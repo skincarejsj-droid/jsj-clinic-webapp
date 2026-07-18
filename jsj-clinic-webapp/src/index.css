@@ -1,0 +1,60 @@
+@import url("https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  font-family: "Plus Jakarta Sans", sans-serif;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: #e7e5e4;
+  border-radius: 4px;
+}
+
+@media print {
+  body * {
+    visibility: hidden;
+  }
+}
+
+/* Brand palette sampled directly from the JSJ Skin Care logo:
+   navy #323850 (the two "J" strokes) and gray #545454 (the "S"). */
+.bg-stone-900 {
+  background-color: #323850 !important;
+}
+.text-stone-900 {
+  color: #323850 !important;
+}
+.bg-rose-500 {
+  background-color: #545454 !important;
+}
+.hover\:bg-rose-600:hover {
+  background-color: #3f3f3f !important;
+}
+.bg-rose-50 {
+  background-color: #ececee !important;
+}
+.text-rose-700 {
+  color: #323850 !important;
+}
+.text-rose-600 {
+  color: #545454 !important;
+}
+.text-rose-500 {
+  color: #545454 !important;
+}
+.text-rose-200\/70 {
+  color: #b9bcc6 !important;
+}
+.border-t-rose-400 {
+  border-top-color: #323850 !important;
+}
+.focus\:ring-rose-400:focus {
+  --tw-ring-color: #323850 !important;
+}
