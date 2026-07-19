@@ -164,6 +164,7 @@ const HOLIDAY_TYPES = ["None", "Regular Holiday", "Special Holiday"];
 const SICK_LEAVE_ALLOWANCE = 10;
 const VACATION_LEAVE_ALLOWANCE = 10;
 const STANDARD_HOURS = 8;
+const OT_UNDERTIME_THRESHOLD_HOURS = 0.5; // must differ from 8 hours by at least 30 minutes to count as OT/undertime
 const MED_OUT_REASONS = ["Used in Treatment", "Sold", "Expired", "Damaged", "Other"];
 const SUP_OUT_REASONS = ["Used in Clinic", "Damaged", "Other"];
 
@@ -175,8 +176,10 @@ function round2(n) {
  * Computes a single attendance day's pay.
  * - basicRegular: the day's basic wage BEFORE any holiday multiplier (used for 13th month pay).
  * - basic: the day's basic wage AFTER the holiday multiplier is applied (used for actual payroll payout).
- * - undertime is deducted pro-rata against the hourly rate (dailyRate / 8).
- * - overtime (hours beyond 8, only when both time in and time out are logged) is paid at 125% of the hourly rate.
+ * - undertime is deducted pro-rata against the hourly rate (dailyRate / 8), but only once the
+ *   shortfall reaches OT_UNDERTIME_THRESHOLD_HOURS (30 minutes) - smaller gaps are paid as a full day.
+ * - overtime (hours beyond 8, only when both time in and time out are logged) is paid at 125% of
+ *   the hourly rate, but only once the excess reaches the same 30-minute threshold.
  */
 function computeDayPay(r, dailyRate) {
   const hourly = dailyRate / STANDARD_HOURS;
@@ -197,12 +200,16 @@ function computeDayPay(r, dailyRate) {
   } else if (r.status === "Present" || r.status === "Late") {
     if (r.timeIn && r.timeOut) {
       const hrs = hoursBetween(r.timeIn, r.timeOut);
-      if (hrs < STANDARD_HOURS) {
+      const diff = hrs - STANDARD_HOURS;
+      if (Math.abs(diff) < OT_UNDERTIME_THRESHOLD_HOURS) {
+        // Within the 30-minute grace period either way - pay a normal full day.
+        basicRegular = dailyRate;
+      } else if (diff < 0) {
         undertimeHours = round2(STANDARD_HOURS - hrs);
         basicRegular = round2(hrs * hourly);
       } else {
         basicRegular = dailyRate;
-        otHours = round2(hrs - STANDARD_HOURS);
+        otHours = round2(diff);
         otPay = round2(otHours * hourly * 1.25);
       }
     } else {
@@ -1810,7 +1817,7 @@ function PayrollSection({ employees, attendance, addTransaction, payrollRuns, se
         <button onClick={recordPayroll} className={btnPrimary}><Wallet size={16} />Record to Cash Out</button>
       </div>
       <p className="text-xs text-stone-500 px-1">
-        Basic pay is computed from attendance: undertime is pro-rated against an 8-hour day, overtime pays 125% of the hourly rate, and holiday-flagged days are paid at x2 (Regular) or x1.30 (Special).
+        Basic pay is computed from attendance: an 8-hour day is standard, and undertime/overtime only kick in once the difference reaches 30 minutes (smaller gaps are paid as a normal full day). Undertime is pro-rated against the hourly rate, overtime pays 125% of the hourly rate, and holiday-flagged days are paid at x2 (Regular) or x1.30 (Special).
       </p>
 
       <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-x-auto">
