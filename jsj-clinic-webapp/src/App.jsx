@@ -995,7 +995,9 @@ function InventoryModule({ title, icon: Icon, data, setData, cashOutCategory, ca
   const items = data.items || [];
   const log = data.log || [];
 
-  const filteredItems = items.filter((i) => i.name.toLowerCase().includes(search.toLowerCase()));
+  const filteredItems = items
+    .filter((i) => i.name.toLowerCase().includes(search.toLowerCase()))
+    .sort((a, b) => a.name.localeCompare(b.name));
   const lowItems = items.filter((i) => Number(i.quantity) <= Number(i.reorderLevel));
 
   const addItem = (item) => {
@@ -1117,7 +1119,7 @@ function InventoryModule({ title, icon: Icon, data, setData, cashOutCategory, ca
           <h3 className="font-serif text-base text-stone-900 mr-auto">Movement Log</h3>
           <select value={logFilterItem} onChange={(e) => setLogFilterItem(e.target.value)} className={inputCls("w-auto")}>
             <option value="all">All Items</option>
-            {items.map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}
+            {[...items].sort((a, b) => a.name.localeCompare(b.name)).map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}
           </select>
           <select value={logFilterType} onChange={(e) => setLogFilterType(e.target.value)} className={inputCls("w-auto")}>
             <option value="all">All Movements</option>
