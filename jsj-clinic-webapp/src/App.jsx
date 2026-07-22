@@ -262,9 +262,24 @@ function useSupabaseTable(table) {
     let alive = true;
 
     (async () => {
-      const { data, error } = await supabase.from(table).select("*");
+      // Supabase/PostgREST caps a single request at 1000 rows by default, so we
+      // page through in batches until a short page tells us we've got everything.
+      const pageSize = 1000;
+      let all = [];
+      let from = 0;
+      while (true) {
+        const { data, error } = await supabase.from(table).select("*").range(from, from + pageSize - 1);
+        if (error) {
+          console.error(`Fetch from ${table} failed`, error);
+          break;
+        }
+        if (!data || data.length === 0) break;
+        all = all.concat(data);
+        if (data.length < pageSize) break;
+        from += pageSize;
+      }
       if (alive) {
-        if (!error && data) setRows(data);
+        setRows(all);
         setLoaded(true);
       }
     })();
