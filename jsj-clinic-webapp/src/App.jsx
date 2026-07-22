@@ -232,6 +232,18 @@ function computeDayPay(r, dailyRate) {
   };
 }
 
+/**
+ * Finds the daily rate that was actually in effect for an employee on a given date,
+ * using logged rate-change history. Falls back to the employee's current rate if no
+ * history entry applies yet (e.g. an employee who has never had a logged rate change).
+ */
+function getRateForDate(employeeId, dateStr, fallbackRate, rateHistory) {
+  const entries = (rateHistory || []).filter((r) => r.employeeId === employeeId && r.effectiveFrom <= dateStr);
+  if (entries.length === 0) return Number(fallbackRate) || 0;
+  const latest = entries.reduce((a, b) => (a.effectiveFrom > b.effectiveFrom ? a : b));
+  return Number(latest.dailyRate) || 0;
+}
+
 const NAV = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { id: "sales", label: "Sales", icon: Wallet },
@@ -1361,7 +1373,50 @@ function LeaveCreditsPanel({ employees, attendance }) {
   );
 }
 
-function AttendanceSection({ employees, insertEmployee, updateEmployee, removeEmployee, attendance, insertAttendance, updateAttendance, removeAttendance, notify, askConfirm }) {
+function RateHistoryModal({ employee, history, onClose, onSave }) {
+  const [rate, setRate] = useState("");
+  const [effectiveFrom, setEffectiveFrom] = useState(todayStr());
+
+  const sorted = [...history].sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom));
+
+  const submit = () => {
+    if (!rate || Number(rate) <= 0) return;
+    onSave({ dailyRate: Number(rate), effectiveFrom });
+    setRate("");
+  };
+
+  return (
+    <Modal title={`Rate History \u2014 ${employee.name}`} onClose={onClose} footer={<button onClick={onClose} className={btnGhost}>Close</button>}>
+      <div className="mb-4">
+        <Field label="New Rate (PHP)">
+          <input type="number" min="0" step="0.01" value={rate} onChange={(e) => setRate(e.target.value)} className={inputCls()} placeholder="0.00" />
+        </Field>
+        <Field label="Effective From">
+          <input type="date" value={effectiveFrom} onChange={(e) => setEffectiveFrom(e.target.value)} className={inputCls()} />
+        </Field>
+        <button onClick={submit} className={btnPrimary}>Log Rate Change</button>
+      </div>
+      <h4 className="text-xs uppercase tracking-wide text-stone-500 mb-2">History</h4>
+      {sorted.length === 0 ? (
+        <p className="text-sm text-stone-400">No rate changes logged yet \u2014 payroll uses the employee's current daily rate for all dates.</p>
+      ) : (
+        <table className="w-full text-sm">
+          <thead><tr className="text-left text-xs text-stone-500 uppercase"><th className="py-1">Effective From</th><th className="py-1">Daily Rate</th></tr></thead>
+          <tbody>
+            {sorted.map((h) => (
+              <tr key={h.id} className="border-t border-stone-100">
+                <td className="py-1.5">{fmtDate(h.effectiveFrom)}</td>
+                <td className="py-1.5 font-medium">{peso(h.dailyRate)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Modal>
+  );
+}
+
+function AttendanceSection({ employees, insertEmployee, updateEmployee, removeEmployee, attendance, insertAttendance, updateAttendance, removeAttendance, rateHistory, insertRateHistory, notify, askConfirm }) {
   const [tab, setTab] = useState("employees");
   const [empModalOpen, setEmpModalOpen] = useState(false);
   const [editEmp, setEditEmp] = useState(null);
@@ -1371,6 +1426,7 @@ function AttendanceSection({ employees, insertEmployee, updateEmployee, removeEm
   const [filterEmp, setFilterEmp] = useState("all");
   const [from, setFrom] = useState(addDays(todayStr(), -13));
   const [to, setTo] = useState(todayStr());
+  const [rateHistoryEmp, setRateHistoryEmp] = useState(null);
 
   const activeEmployees = employees.filter((e) => e.status === "Active");
 
@@ -1477,6 +1533,7 @@ function AttendanceSection({ employees, insertEmployee, updateEmployee, removeEm
                       <td className="px-4 py-2.5">{e.status === "Active" ? <Badge tone="green">Active</Badge> : <Badge tone="neutral">Inactive</Badge>}</td>
                       <td className="px-4 py-2.5">
                         <div className="flex items-center gap-1 justify-end">
+                          <button onClick={() => setRateHistoryEmp(e)} className={btnIcon} title="Rate History"><Clock size={14} /></button>
                           <button onClick={() => toggleStatus(e)} className={btnIcon} title="Toggle Active/Inactive"><CheckCircle2 size={14} /></button>
                           <button onClick={() => { setEditEmp(e); setEmpModalOpen(true); }} className={btnIcon}><Pencil size={14} /></button>
                           <button onClick={() => deleteEmployee(e.id)} className={btnIcon}><Trash2 size={14} /></button>
@@ -1575,6 +1632,20 @@ function AttendanceSection({ employees, insertEmployee, updateEmployee, removeEm
 
       {empModalOpen && <EmployeeModal initial={editEmp} onClose={() => { setEmpModalOpen(false); setEditEmp(null); }} onSave={saveEmployee} />}
       {recModalOpen && <RecordModal initial={editRec} employees={employees} onClose={() => { setRecModalOpen(false); setEditRec(null); }} onSave={upsertRecord} />}
+      {rateHistoryEmp && (
+        <RateHistoryModal
+          employee={rateHistoryEmp}
+          history={rateHistory.filter((r) => r.employeeId === rateHistoryEmp.id)}
+          onClose={() => setRateHistoryEmp(null)}
+          onSave={(entry) => {
+            insertRateHistory({ id: uid(), employeeId: rateHistoryEmp.id, ...entry });
+            if (entry.effectiveFrom <= todayStr()) {
+              updateEmployee(rateHistoryEmp.id, { dailyRate: entry.dailyRate });
+            }
+            notify("Rate change logged");
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -1692,7 +1763,7 @@ function PayrollRunModal({ run, onClose }) {
   );
 }
 
-function ThirteenthMonthPanel({ employees, attendance, addTransaction, notify }) {
+function ThirteenthMonthPanel({ employees, attendance, rateHistory, addTransaction, notify }) {
   const [year, setYear] = useState(new Date().getFullYear());
   const activeEmployees = employees.filter((e) => e.status === "Active");
 
@@ -1702,11 +1773,14 @@ function ThirteenthMonthPanel({ employees, attendance, addTransaction, notify })
     return activeEmployees.map((emp) => {
       const recs = attendance.filter((a) => a.employeeId === emp.id && a.date >= yearStart && a.date <= yearEnd);
       let basicRegularTotal = 0;
-      recs.forEach((r) => { basicRegularTotal += computeDayPay(r, emp.dailyRate).basicRegular; });
+      recs.forEach((r) => {
+        const rate = getRateForDate(emp.id, r.date, emp.dailyRate, rateHistory);
+        basicRegularTotal += computeDayPay(r, rate).basicRegular;
+      });
       basicRegularTotal = round2(basicRegularTotal);
       return { employee: emp, basicRegularTotal, thirteenth: round2(basicRegularTotal / 12) };
     });
-  }, [activeEmployees, attendance, year]);
+  }, [activeEmployees, attendance, rateHistory, year]);
 
   const total = rows.reduce((a, b) => a + b.thirteenth, 0);
 
@@ -1768,7 +1842,7 @@ function ThirteenthMonthPanel({ employees, attendance, addTransaction, notify })
   );
 }
 
-function PayrollSection({ employees, attendance, addTransaction, payrollRuns, insertPayrollRun, notify }) {
+function PayrollSection({ employees, attendance, rateHistory, addTransaction, payrollRuns, insertPayrollRun, notify }) {
   const [periodType, setPeriodType] = useState("Monthly");
   const [start, setStart] = useState(startOfMonth(todayStr()));
   const [deductions, setDeductions] = useState({});
@@ -1790,7 +1864,8 @@ function PayrollSection({ employees, attendance, addTransaction, payrollRuns, in
       const recs = attendance.filter((a) => a.employeeId === emp.id && a.date >= start && a.date <= end);
       let basicTotal = 0, otTotal = 0, otHoursTotal = 0, undertimeHoursTotal = 0, holidayDays = 0;
       recs.forEach((r) => {
-        const c = computeDayPay(r, emp.dailyRate);
+        const rate = getRateForDate(emp.id, r.date, emp.dailyRate, rateHistory);
+        const c = computeDayPay(r, rate);
         basicTotal += c.basic;
         otTotal += c.otPay;
         otHoursTotal += c.otHours;
@@ -1807,7 +1882,7 @@ function PayrollSection({ employees, attendance, addTransaction, payrollRuns, in
       const net = Math.max(0, round2(gross - dedTotal));
       return { employee: emp, recs, basicTotal, otTotal, otHoursTotal, undertimeHoursTotal, holidayDays, gross, ded, deduction: dedTotal, net };
     });
-  }, [activeEmployees, attendance, start, end, deductions]);
+  }, [activeEmployees, attendance, rateHistory, start, end, deductions]);
 
   const totalNet = round2(rows.reduce((a, b) => a + b.net, 0));
 
@@ -1920,7 +1995,7 @@ function PayrollSection({ employees, attendance, addTransaction, payrollRuns, in
         )}
       </div>
 
-      <ThirteenthMonthPanel employees={employees} attendance={attendance} addTransaction={addTransaction} notify={notify} />
+      <ThirteenthMonthPanel employees={employees} attendance={attendance} rateHistory={rateHistory} addTransaction={addTransaction} notify={notify} />
 
       {payslip && <PayslipModal row={payslip} periodType={periodType} start={start} end={end} onClose={() => setPayslip(null)} />}
       {historyOpen && <PayrollRunModal run={historyOpen} onClose={() => setHistoryOpen(null)} />}
@@ -1947,6 +2022,7 @@ function ClinicApp({ session }) {
   const [employees, l6, insertEmployee, updateEmployee, removeEmployee] = useSupabaseTable("employees");
   const [attendance, l7, insertAttendance, updateAttendance, removeAttendance] = useSupabaseTable("attendance");
   const [payrollRuns, l8, insertPayrollRun] = useSupabaseTable("payroll_runs");
+  const [rateHistory, l9, insertRateHistory] = useSupabaseTable("rate_history");
   const clinicSettings = useSupabaseSettings();
 
   const [active, setActive] = useState("dashboard");
@@ -1955,7 +2031,7 @@ function ClinicApp({ session }) {
   const toastTimer = useRef(null);
   const [confirmState, setConfirmState] = useState(null);
 
-  const loaded = l1 && l2 && l3 && l4 && l5 && l6 && l7 && l8;
+  const loaded = l1 && l2 && l3 && l4 && l5 && l6 && l7 && l8 && l9;
 
   const notify = (message, type = "success") => {
     setToast({ message, type });
@@ -2087,12 +2163,14 @@ function ClinicApp({ session }) {
             insertAttendance={insertAttendance}
             updateAttendance={updateAttendance}
             removeAttendance={removeAttendance}
+            rateHistory={rateHistory}
+            insertRateHistory={insertRateHistory}
             notify={notify}
             askConfirm={askConfirm}
           />
         )}
         {active === "payroll" && (
-          <PayrollSection employees={employees} attendance={attendance} addTransaction={addTransaction} payrollRuns={payrollRuns} insertPayrollRun={insertPayrollRun} notify={notify} />
+          <PayrollSection employees={employees} attendance={attendance} rateHistory={rateHistory} addTransaction={addTransaction} payrollRuns={payrollRuns} insertPayrollRun={insertPayrollRun} notify={notify} />
         )}
       </main>
 
