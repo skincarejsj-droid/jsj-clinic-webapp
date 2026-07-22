@@ -248,32 +248,44 @@ const NAV = [
  * `app_storage` table, and subscribes to realtime changes so edits made on
  * one computer appear on every other computer automatically.
  */
-function useSupabaseState(key, initial) {
-  const [value, setValue] = useState(initial);
+/**
+ * Syncs an array of individual rows with a real Supabase table: each record is its
+ * own row, and inserts/updates/deletes only ever touch that one row - never the
+ * whole table - so two computers editing at the same time can't overwrite each
+ * other's data. Realtime keeps every open browser in sync automatically.
+ */
+function useSupabaseTable(table) {
+  const [rows, setRows] = useState([]);
   const [loaded, setLoaded] = useState(false);
-  const savingRef = useRef(false);
 
   useEffect(() => {
     let alive = true;
 
     (async () => {
-      const { data, error } = await supabase.from("app_storage").select("value").eq("key", key).maybeSingle();
+      const { data, error } = await supabase.from(table).select("*");
       if (alive) {
-        if (!error && data && data.value != null) setValue(data.value);
+        if (!error && data) setRows(data);
         setLoaded(true);
       }
     })();
 
     const channel = supabase
-      .channel(`app_storage_${key}`)
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "app_storage", filter: `key=eq.${key}` },
-        (payload) => {
-          if (savingRef.current) return; // ignore the echo of our own write
-          if (payload.new && payload.new.value != null) setValue(payload.new.value);
-        }
-      )
+      .channel(`realtime_${table}`)
+      .on("postgres_changes", { event: "*", schema: "public", table }, (payload) => {
+        setRows((prev) => {
+          if (payload.eventType === "INSERT") {
+            if (prev.some((r) => r.id === payload.new.id)) return prev;
+            return [...prev, payload.new];
+          }
+          if (payload.eventType === "UPDATE") {
+            return prev.map((r) => (r.id === payload.new.id ? payload.new : r));
+          }
+          if (payload.eventType === "DELETE") {
+            return prev.filter((r) => r.id !== payload.old.id);
+          }
+          return prev;
+        });
+      })
       .subscribe();
 
     return () => {
@@ -281,22 +293,42 @@ function useSupabaseState(key, initial) {
       supabase.removeChannel(channel);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
+  }, [table]);
 
+  const insertRow = async (row) => {
+    setRows((prev) => [...prev, row]); // optimistic - feels instant
+    const { error } = await supabase.from(table).insert(row);
+    if (error) console.error(`Insert into ${table} failed`, error);
+  };
+
+  const updateRow = async (id, patch) => {
+    setRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+    const { error } = await supabase.from(table).update(patch).eq("id", id);
+    if (error) console.error(`Update in ${table} failed`, error);
+  };
+
+  const removeRow = async (id) => {
+    setRows((prev) => prev.filter((r) => r.id !== id));
+    const { error } = await supabase.from(table).delete().eq("id", id);
+    if (error) console.error(`Delete from ${table} failed`, error);
+  };
+
+  return [rows, loaded, insertRow, updateRow, removeRow];
+}
+
+/** Reads the single clinic settings row. Read-mostly, so no write helper needed yet. */
+function useSupabaseSettings() {
+  const [settings, setSettings] = useState({
+    name: "JSJ Skin Care Medical and Aesthetic Clinic",
+    address: "590 Sumulong St, Morong, Rizal",
+  });
   useEffect(() => {
-    if (!loaded) return;
     (async () => {
-      savingRef.current = true;
-      const { error } = await supabase
-        .from("app_storage")
-        .upsert({ key, value, updated_at: new Date().toISOString() });
-      if (error) console.error("Supabase save failed", key, error);
-      setTimeout(() => { savingRef.current = false; }, 400);
+      const { data, error } = await supabase.from("settings").select("*").eq("id", "clinic").maybeSingle();
+      if (!error && data) setSettings(data);
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [value, loaded]);
-
-  return [value, setValue, loaded];
+  }, []);
+  return settings;
 }
 
 /* ============================== shared UI ============================== */
@@ -733,7 +765,7 @@ function TransactionModal({ initial, onClose, onSave }) {
   );
 }
 
-function SalesSection({ transactions, setTransactions, notify, askConfirm }) {
+function SalesSection({ transactions, insertTransaction, updateTransaction, removeTransaction, notify, askConfirm }) {
   const [typeFilter, setTypeFilter] = useState("all");
   const [catFilter, setCatFilter] = useState("all");
   const [from, setFrom] = useState("");
@@ -768,10 +800,10 @@ function SalesSection({ transactions, setTransactions, notify, askConfirm }) {
 
   const save = (txn) => {
     if (editing) {
-      setTransactions((prev) => prev.map((t) => (t.id === editing.id ? { ...t, ...txn } : t)));
+      updateTransaction(editing.id, txn);
       notify("Transaction updated");
     } else {
-      setTransactions((prev) => [{ id: uid(), createdAt: Date.now(), ...txn }, ...prev]);
+      insertTransaction({ id: uid(), createdAt: Date.now(), ...txn });
       notify("Transaction recorded");
     }
     setModalOpen(false);
@@ -780,7 +812,7 @@ function SalesSection({ transactions, setTransactions, notify, askConfirm }) {
 
   const remove = (id) => {
     askConfirm("Delete this transaction? This cannot be undone.", () => {
-      setTransactions((prev) => prev.filter((t) => t.id !== id));
+      removeTransaction(id);
       notify("Transaction deleted");
     });
   };
@@ -983,7 +1015,7 @@ function StockOutModal({ item, reasons, allowSaleIncome, onClose, onSave }) {
   );
 }
 
-function InventoryModule({ title, icon: Icon, data, setData, cashOutCategory, cashInCategory, allowSaleIncome, reasonsOut, unitOptions, addTransaction, notify, askConfirm }) {
+function InventoryModule({ title, icon: Icon, items, log, insertItem, updateItem, removeItem, insertLog, cashOutCategory, cashInCategory, allowSaleIncome, reasonsOut, unitOptions, addTransaction, notify, askConfirm }) {
   const [search, setSearch] = useState("");
   const [addOpen, setAddOpen] = useState(false);
   const [editItem, setEditItem] = useState(null);
@@ -992,29 +1024,26 @@ function InventoryModule({ title, icon: Icon, data, setData, cashOutCategory, ca
   const [logFilterItem, setLogFilterItem] = useState("all");
   const [logFilterType, setLogFilterType] = useState("all");
 
-  const items = data.items || [];
-  const log = data.log || [];
-
   const filteredItems = items
     .filter((i) => i.name.toLowerCase().includes(search.toLowerCase()))
     .sort((a, b) => a.name.localeCompare(b.name));
   const lowItems = items.filter((i) => Number(i.quantity) <= Number(i.reorderLevel));
 
   const addItem = (item) => {
-    setData((d) => ({ ...d, items: [...(d.items || []), { id: uid(), quantity: 0, ...item }] }));
+    insertItem({ id: uid(), quantity: 0, ...item });
     notify(`${title} added`);
     setAddOpen(false);
   };
 
   const saveEdit = (id, patch) => {
-    setData((d) => ({ ...d, items: (d.items || []).map((i) => (i.id === id ? { ...i, ...patch } : i)) }));
+    updateItem(id, patch);
     notify(`${title} updated`);
     setEditItem(null);
   };
 
   const deleteItem = (id) => {
     askConfirm(`Remove this ${title.toLowerCase()} item? Its movement history will be kept.`, () => {
-      setData((d) => ({ ...d, items: (d.items || []).filter((i) => i.id !== id) }));
+      removeItem(id);
       notify(`${title} removed`);
     });
   };
@@ -1022,10 +1051,8 @@ function InventoryModule({ title, icon: Icon, data, setData, cashOutCategory, ca
   const doStockIn = ({ itemId, qty, date, note, cost, recordExpense }) => {
     const item = items.find((i) => i.id === itemId);
     if (!item) return;
-    setData((d) => ({
-      items: (d.items || []).map((i) => (i.id === itemId ? { ...i, quantity: Number(i.quantity) + Number(qty) } : i)),
-      log: [{ id: uid(), itemId, itemName: item.name, type: "in", qty: Number(qty), date, note, amount: cost ? Number(cost) : 0, createdAt: Date.now() }, ...(d.log || [])],
-    }));
+    updateItem(itemId, { quantity: Number(item.quantity) + Number(qty) });
+    insertLog({ id: uid(), itemId, itemName: item.name, type: "in", qty: Number(qty), date, note, amount: cost ? Number(cost) : 0, createdAt: Date.now() });
     if (cost && Number(cost) > 0 && recordExpense) {
       addTransaction({ type: "out", category: cashOutCategory, amount: Number(cost), date, description: `${title} In - ${item.name} (${qty} ${item.unit || ""})` });
     }
@@ -1037,10 +1064,8 @@ function InventoryModule({ title, icon: Icon, data, setData, cashOutCategory, ca
     const item = items.find((i) => i.id === itemId);
     if (!item) return;
     if (Number(qty) > Number(item.quantity)) { notify("Quantity exceeds current stock", "error"); return; }
-    setData((d) => ({
-      items: (d.items || []).map((i) => (i.id === itemId ? { ...i, quantity: Number(i.quantity) - Number(qty) } : i)),
-      log: [{ id: uid(), itemId, itemName: item.name, type: "out", qty: Number(qty), date, reason, note, amount: amount ? Number(amount) : 0, createdAt: Date.now() }, ...(d.log || [])],
-    }));
+    updateItem(itemId, { quantity: Number(item.quantity) - Number(qty) });
+    insertLog({ id: uid(), itemId, itemName: item.name, type: "out", qty: Number(qty), date, reason, note, amount: amount ? Number(amount) : 0, createdAt: Date.now() });
     if (allowSaleIncome && reason === "Sold" && amount && Number(amount) > 0 && recordIncome) {
       addTransaction({ type: "in", category: cashInCategory, amount: Number(amount), date, description: `${item.name} sold (${qty} ${item.unit || ""})` });
     }
@@ -1321,7 +1346,7 @@ function LeaveCreditsPanel({ employees, attendance }) {
   );
 }
 
-function AttendanceSection({ employees, setEmployees, attendance, setAttendance, notify, askConfirm }) {
+function AttendanceSection({ employees, insertEmployee, updateEmployee, removeEmployee, attendance, insertAttendance, updateAttendance, removeAttendance, notify, askConfirm }) {
   const [tab, setTab] = useState("employees");
   const [empModalOpen, setEmpModalOpen] = useState(false);
   const [editEmp, setEditEmp] = useState(null);
@@ -1336,10 +1361,10 @@ function AttendanceSection({ employees, setEmployees, attendance, setAttendance,
 
   const saveEmployee = (emp) => {
     if (editEmp) {
-      setEmployees((prev) => prev.map((e) => (e.id === editEmp.id ? { ...e, ...emp } : e)));
+      updateEmployee(editEmp.id, emp);
       notify("Employee updated");
     } else {
-      setEmployees((prev) => [...prev, { id: uid(), status: "Active", ...emp }]);
+      insertEmployee({ id: uid(), status: "Active", ...emp });
       notify("Employee added");
     }
     setEmpModalOpen(false);
@@ -1347,22 +1372,22 @@ function AttendanceSection({ employees, setEmployees, attendance, setAttendance,
   };
 
   const toggleStatus = (emp) => {
-    setEmployees((prev) => prev.map((e) => (e.id === emp.id ? { ...e, status: e.status === "Active" ? "Inactive" : "Active" } : e)));
+    updateEmployee(emp.id, { status: emp.status === "Active" ? "Inactive" : "Active" });
   };
 
   const deleteEmployee = (id) => {
     askConfirm("Remove this employee? Their attendance history will be kept.", () => {
-      setEmployees((prev) => prev.filter((e) => e.id !== id));
+      removeEmployee(id);
       notify("Employee removed");
     });
   };
 
   const upsertRecord = (rec) => {
     if (editRec) {
-      setAttendance((prev) => prev.map((r) => (r.id === editRec.id ? { ...r, ...rec } : r)));
+      updateAttendance(editRec.id, rec);
       notify("Attendance updated");
     } else {
-      setAttendance((prev) => [{ id: uid(), ...rec }, ...prev]);
+      insertAttendance({ id: uid(), ...rec });
       notify("Attendance recorded");
     }
     setRecModalOpen(false);
@@ -1371,7 +1396,7 @@ function AttendanceSection({ employees, setEmployees, attendance, setAttendance,
 
   const deleteRecord = (id) => {
     askConfirm("Delete this attendance record?", () => {
-      setAttendance((prev) => prev.filter((r) => r.id !== id));
+      removeAttendance(id);
       notify("Record deleted");
     });
   };
@@ -1382,9 +1407,9 @@ function AttendanceSection({ employees, setEmployees, attendance, setAttendance,
     const time = nowTime();
     const existing = attendance.find((r) => r.employeeId === quickEmp && r.date === today);
     if (existing) {
-      setAttendance((prev) => prev.map((r) => (r.id === existing.id ? { ...r, [field]: time, status: r.status || "Present" } : r)));
+      updateAttendance(existing.id, { [field]: time, status: existing.status || "Present" });
     } else {
-      setAttendance((prev) => [{ id: uid(), employeeId: quickEmp, date: today, timeIn: field === "timeIn" ? time : "", timeOut: field === "timeOut" ? time : "", status: "Present", holidayType: "None" }, ...prev]);
+      insertAttendance({ id: uid(), employeeId: quickEmp, date: today, timeIn: field === "timeIn" ? time : "", timeOut: field === "timeOut" ? time : "", status: "Present", holidayType: "None" });
     }
     notify(field === "timeIn" ? "Timed in" : "Timed out");
   };
@@ -1728,7 +1753,7 @@ function ThirteenthMonthPanel({ employees, attendance, addTransaction, notify })
   );
 }
 
-function PayrollSection({ employees, attendance, addTransaction, payrollRuns, setPayrollRuns, notify }) {
+function PayrollSection({ employees, attendance, addTransaction, payrollRuns, insertPayrollRun, notify }) {
   const [periodType, setPeriodType] = useState("Monthly");
   const [start, setStart] = useState(startOfMonth(todayStr()));
   const [deductions, setDeductions] = useState({});
@@ -1776,21 +1801,18 @@ function PayrollSection({ employees, attendance, addTransaction, payrollRuns, se
     if (payable.length === 0) { notify("No payable salaries for this period", "error"); return; }
     const note = payable.map((r) => `${r.employee.name}: ${peso(r.net)}`).join(" | ");
     addTransaction({ type: "out", category: "Payroll", amount: totalNet, date: end, description: `Payroll (${periodType}) ${fmtDate(start)}\u2013${fmtDate(end)} \u2014 ${note}` });
-    setPayrollRuns((prev) => [
-      {
-        id: uid(),
-        periodType,
-        start,
-        end,
-        rows: payable.map((r) => ({
-          employeeId: r.employee.id, name: r.employee.name, dailyRate: r.employee.dailyRate,
-          basicTotal: r.basicTotal, otTotal: r.otTotal, gross: r.gross, deduction: r.deduction, net: r.net,
-        })),
-        total: totalNet,
-        processedAt: todayStr(),
-      },
-      ...prev,
-    ]);
+    insertPayrollRun({
+      id: uid(),
+      periodType,
+      start,
+      end,
+      rows: payable.map((r) => ({
+        employeeId: r.employee.id, name: r.employee.name, dailyRate: r.employee.dailyRate,
+        basicTotal: r.basicTotal, otTotal: r.otTotal, gross: r.gross, deduction: r.deduction, net: r.net,
+      })),
+      total: totalNet,
+      processedAt: todayStr(),
+    });
     notify("Payroll recorded to Cash Out");
   };
 
@@ -1867,7 +1889,7 @@ function PayrollSection({ employees, attendance, addTransaction, payrollRuns, se
           <EmptyState icon={Calculator} text="No payroll has been processed yet." />
         ) : (
           <ul className="divide-y divide-stone-100">
-            {payrollRuns.map((run) => (
+            {[...payrollRuns].sort((a, b) => (b.processedAt + b.end).localeCompare(a.processedAt + a.end)).map((run) => (
               <li key={run.id} className="px-4 py-3 flex items-center justify-between text-sm gap-2">
                 <div className="min-w-0 truncate">
                   <span className="font-medium text-stone-900">{run.periodType}</span>
@@ -1902,16 +1924,15 @@ function PayrollSection({ employees, attendance, addTransaction, payrollRuns, se
 /* ============================== App ============================== */
 
 function ClinicApp({ session }) {
-  const [transactions, setTransactions, l1] = useSupabaseState("jsj-transactions", []);
-  const [medications, setMedications, l2] = useSupabaseState("jsj-medications", { items: [], log: [] });
-  const [supplies, setSupplies, l3] = useSupabaseState("jsj-supplies", { items: [], log: [] });
-  const [employees, setEmployees, l4] = useSupabaseState("jsj-employees", []);
-  const [attendance, setAttendance, l5] = useSupabaseState("jsj-attendance", []);
-  const [payrollRuns, setPayrollRuns, l6] = useSupabaseState("jsj-payroll-runs", []);
-  const [clinicSettings] = useSupabaseState("jsj-settings", {
-    name: "JSJ Skin Care Medical and Aesthetic Clinic",
-    address: "590 Sumulong St, Morong, Rizal",
-  });
+  const [transactions, l1, insertTransaction, updateTransaction, removeTransaction] = useSupabaseTable("transactions");
+  const [medItems, l2, insertMedItem, updateMedItem, removeMedItem] = useSupabaseTable("medications");
+  const [medLog, l3, insertMedLog] = useSupabaseTable("medication_log");
+  const [supItems, l4, insertSupItem, updateSupItem, removeSupItem] = useSupabaseTable("supplies");
+  const [supLog, l5, insertSupLog] = useSupabaseTable("supply_log");
+  const [employees, l6, insertEmployee, updateEmployee, removeEmployee] = useSupabaseTable("employees");
+  const [attendance, l7, insertAttendance, updateAttendance, removeAttendance] = useSupabaseTable("attendance");
+  const [payrollRuns, l8, insertPayrollRun] = useSupabaseTable("payroll_runs");
+  const clinicSettings = useSupabaseSettings();
 
   const [active, setActive] = useState("dashboard");
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -1919,7 +1940,7 @@ function ClinicApp({ session }) {
   const toastTimer = useRef(null);
   const [confirmState, setConfirmState] = useState(null);
 
-  const loaded = l1 && l2 && l3 && l4 && l5 && l6;
+  const loaded = l1 && l2 && l3 && l4 && l5 && l6 && l7 && l8;
 
   const notify = (message, type = "success") => {
     setToast({ message, type });
@@ -1929,7 +1950,7 @@ function ClinicApp({ session }) {
   const askConfirm = (message, onConfirm) => setConfirmState({ message, onConfirm });
 
   const addTransaction = (txn) => {
-    setTransactions((prev) => [{ id: uid(), createdAt: Date.now(), ...txn }, ...prev]);
+    insertTransaction({ id: uid(), createdAt: Date.now(), ...txn });
   };
 
   if (!loaded) {
@@ -1983,17 +2004,35 @@ function ClinicApp({ session }) {
         <Topbar title={titles[active][0]} subtitle={titles[active][1]} onMenu={() => setMobileOpen(true)} />
 
         {active === "dashboard" && (
-          <Dashboard transactions={transactions} medications={medications} supplies={supplies} employees={employees} attendance={attendance} setActive={setActive} />
+          <Dashboard
+            transactions={transactions}
+            medications={{ items: medItems }}
+            supplies={{ items: supItems }}
+            employees={employees}
+            attendance={attendance}
+            setActive={setActive}
+          />
         )}
         {active === "sales" && (
-          <SalesSection transactions={transactions} setTransactions={setTransactions} notify={notify} askConfirm={askConfirm} />
+          <SalesSection
+            transactions={transactions}
+            insertTransaction={insertTransaction}
+            updateTransaction={updateTransaction}
+            removeTransaction={removeTransaction}
+            notify={notify}
+            askConfirm={askConfirm}
+          />
         )}
         {active === "medications" && (
           <InventoryModule
             title="Medication"
             icon={Pill}
-            data={medications}
-            setData={setMedications}
+            items={medItems}
+            log={medLog}
+            insertItem={insertMedItem}
+            updateItem={updateMedItem}
+            removeItem={removeMedItem}
+            insertLog={insertMedLog}
             cashOutCategory="Inventory"
             cashInCategory="Medications"
             allowSaleIncome={true}
@@ -2008,8 +2047,12 @@ function ClinicApp({ session }) {
           <InventoryModule
             title="Supply"
             icon={Package}
-            data={supplies}
-            setData={setSupplies}
+            items={supItems}
+            log={supLog}
+            insertItem={insertSupItem}
+            updateItem={updateSupItem}
+            removeItem={removeSupItem}
+            insertLog={insertSupLog}
             cashOutCategory="Supplies"
             allowSaleIncome={false}
             reasonsOut={SUP_OUT_REASONS}
@@ -2020,10 +2063,21 @@ function ClinicApp({ session }) {
           />
         )}
         {active === "attendance" && (
-          <AttendanceSection employees={employees} setEmployees={setEmployees} attendance={attendance} setAttendance={setAttendance} notify={notify} askConfirm={askConfirm} />
+          <AttendanceSection
+            employees={employees}
+            insertEmployee={insertEmployee}
+            updateEmployee={updateEmployee}
+            removeEmployee={removeEmployee}
+            attendance={attendance}
+            insertAttendance={insertAttendance}
+            updateAttendance={updateAttendance}
+            removeAttendance={removeAttendance}
+            notify={notify}
+            askConfirm={askConfirm}
+          />
         )}
         {active === "payroll" && (
-          <PayrollSection employees={employees} attendance={attendance} addTransaction={addTransaction} payrollRuns={payrollRuns} setPayrollRuns={setPayrollRuns} notify={notify} />
+          <PayrollSection employees={employees} attendance={attendance} addTransaction={addTransaction} payrollRuns={payrollRuns} insertPayrollRun={insertPayrollRun} notify={notify} />
         )}
       </main>
 
