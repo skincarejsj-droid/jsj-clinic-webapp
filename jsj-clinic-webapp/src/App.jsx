@@ -5,7 +5,7 @@ import {
 import {
   LayoutDashboard, Wallet, Pill, Package, Users, Calculator, Clock,
   Plus, Trash2, Pencil, X, AlertTriangle, Download, Search, Menu,
-  Printer, ArrowUpCircle, ArrowDownCircle, CheckCircle2, LogIn
+  Printer, ArrowUpCircle, ArrowDownCircle, CheckCircle2, LogIn, Lock
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
@@ -164,6 +164,7 @@ const HOLIDAY_TYPES = ["None", "Regular Holiday", "Special Holiday"];
 const SICK_LEAVE_ALLOWANCE = 10;
 const VACATION_LEAVE_ALLOWANCE = 10;
 const STANDARD_HOURS = 8;
+const RESTRICTED_PASSWORD = "051192"; // gates Payroll, Cash Flow Analytics, and Sales totals
 const OT_UNDERTIME_THRESHOLD_HOURS = 0.5; // must differ from 8 hours by at least 30 minutes to count as OT/undertime
 const MED_OUT_REASONS = ["Used in Treatment", "Sold", "Expired", "Damaged", "Other"];
 const SUP_OUT_REASONS = ["Used in Clinic", "Damaged", "Other"];
@@ -453,6 +454,50 @@ function Toast({ toast }) {
   );
 }
 
+/**
+ * Gates its children behind a shared password. `unlocked`/`onUnlock` are lifted to
+ * a parent that stays mounted across tab switches, so once entered correctly the
+ * person doesn't have to re-type it every time they revisit the section.
+ */
+function PasswordGate({ password, unlocked, onUnlock, label, children }) {
+  const [input, setInput] = useState("");
+  const [error, setError] = useState(false);
+
+  if (unlocked) return children;
+
+  const submit = (e) => {
+    e.preventDefault();
+    if (input === password) {
+      onUnlock();
+      setError(false);
+    } else {
+      setError(true);
+    }
+  };
+
+  return (
+    <div className="bg-white rounded-2xl border border-stone-200 shadow-sm p-8 flex flex-col items-center text-center gap-3 max-w-sm mx-auto">
+      <div className="w-11 h-11 rounded-full bg-stone-100 flex items-center justify-center">
+        <Lock size={20} className="text-stone-500" />
+      </div>
+      <h3 className="font-serif text-base text-stone-900">{label || "Restricted"}</h3>
+      <p className="text-sm text-stone-500">Enter the password to view this section.</p>
+      <form onSubmit={submit} className="w-full">
+        <input
+          type="password"
+          value={input}
+          onChange={(e) => { setInput(e.target.value); setError(false); }}
+          className={inputCls()}
+          placeholder="Password"
+          autoFocus
+        />
+        {error && <p className="text-xs text-red-600 mt-1.5">Incorrect password</p>}
+        <button type="submit" className={btnPrimary + " w-full justify-center mt-3"}>Unlock</button>
+      </form>
+    </div>
+  );
+}
+
 /* ============================== Sidebar / Topbar ============================== */
 
 function Sidebar({ active, setActive, mobileOpen, setMobileOpen, clinicName, userEmail, onSignOut }) {
@@ -532,7 +577,7 @@ function Topbar({ title, subtitle, onMenu }) {
 
 /* ============================== Dashboard ============================== */
 
-function Dashboard({ transactions, medications, supplies, employees, attendance, setActive }) {
+function Dashboard({ transactions, medications, supplies, employees, attendance, setActive, analyticsUnlocked, onUnlockAnalytics }) {
   const today = todayStr();
   const monthStart = startOfMonth(today);
   const [period, setPeriod] = useState("monthly");
@@ -595,21 +640,24 @@ function Dashboard({ transactions, medications, supplies, employees, attendance,
       <div className="bg-white rounded-2xl p-5 border border-stone-200 shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
           <h3 className="font-serif text-base text-stone-900">Cash Flow Analytics</h3>
-          <div className="flex gap-1 bg-stone-100 p-1 rounded-lg">
-            {["daily", "weekly", "monthly", "yearly"].map((p) => (
-              <button
-                key={p}
-                onClick={() => setPeriod(p)}
-                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                  period === p ? "bg-white shadow text-stone-900" : "text-stone-500 hover:text-stone-700"
-                }`}
-              >
-                {periodLabels[p]}
-              </button>
-            ))}
-          </div>
+          {analyticsUnlocked && (
+            <div className="flex gap-1 bg-stone-100 p-1 rounded-lg">
+              {["daily", "weekly", "monthly", "yearly"].map((p) => (
+                <button
+                  key={p}
+                  onClick={() => setPeriod(p)}
+                  className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                    period === p ? "bg-white shadow text-stone-900" : "text-stone-500 hover:text-stone-700"
+                  }`}
+                >
+                  {periodLabels[p]}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
+        <PasswordGate password={RESTRICTED_PASSWORD} unlocked={analyticsUnlocked} onUnlock={onUnlockAnalytics} label="Cash Flow Analytics">
         {transactions.length === 0 ? (
           <EmptyState icon={Wallet} text="No transactions yet to chart." />
         ) : (
@@ -670,6 +718,7 @@ function Dashboard({ transactions, medications, supplies, employees, attendance,
             )}
           </div>
         </div>
+        </PasswordGate>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -792,7 +841,7 @@ function TransactionModal({ initial, onClose, onSave }) {
   );
 }
 
-function SalesSection({ transactions, insertTransaction, updateTransaction, removeTransaction, notify, askConfirm }) {
+function SalesSection({ transactions, insertTransaction, updateTransaction, removeTransaction, totalsUnlocked, onUnlockTotals, notify, askConfirm }) {
   const [typeFilter, setTypeFilter] = useState("all");
   const [catFilter, setCatFilter] = useState("all");
   const [from, setFrom] = useState("");
@@ -825,6 +874,11 @@ function SalesSection({ transactions, insertTransaction, updateTransaction, remo
   const totalOut = filtered.filter((t) => t.type === "out").reduce((a, b) => a + Number(b.amount || 0), 0);
   const allCategories = [...CASH_IN_CATEGORIES, ...CASH_OUT_CATEGORIES];
 
+  const today = todayStr();
+  const todayTx = transactions.filter((t) => t.date === today);
+  const todayIn = todayTx.filter((t) => t.type === "in").reduce((a, b) => a + Number(b.amount || 0), 0);
+  const todayOut = todayTx.filter((t) => t.type === "out").reduce((a, b) => a + Number(b.amount || 0), 0);
+
   const save = (txn) => {
     if (editing) {
       updateTransaction(editing.id, txn);
@@ -853,10 +907,24 @@ function SalesSection({ transactions, insertTransaction, updateTransaction, remo
 
   return (
     <div className="space-y-5">
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <div className="bg-white rounded-2xl p-4 border border-stone-200"><div className="text-xs text-stone-500 mb-1">Cash In</div><div className="font-serif text-xl text-emerald-600">{peso(totalIn)}</div></div>
-        <div className="bg-white rounded-2xl p-4 border border-stone-200"><div className="text-xs text-stone-500 mb-1">Cash Out</div><div className="font-serif text-xl text-red-600">{peso(totalOut)}</div></div>
-        <div className="bg-white rounded-2xl p-4 border border-stone-200"><div className="text-xs text-stone-500 mb-1">Net</div><div className="font-serif text-xl text-stone-900">{peso(totalIn - totalOut)}</div></div>
+      <div>
+        <h3 className="text-xs uppercase tracking-wide text-stone-500 mb-2">Today</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <StatCard label="Today's Cash In" value={peso(todayIn)} icon={ArrowUpCircle} tone="green" />
+          <StatCard label="Today's Cash Out" value={peso(todayOut)} icon={ArrowDownCircle} tone="red" />
+          <StatCard label="Net Today" value={peso(todayIn - todayOut)} icon={Wallet} tone="rose" />
+        </div>
+      </div>
+
+      <div>
+        <h3 className="text-xs uppercase tracking-wide text-stone-500 mb-2">Totals (filtered / all time)</h3>
+        <PasswordGate password={RESTRICTED_PASSWORD} unlocked={totalsUnlocked} onUnlock={onUnlockTotals} label="Sales Totals">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="bg-white rounded-2xl p-4 border border-stone-200"><div className="text-xs text-stone-500 mb-1">Cash In</div><div className="font-serif text-xl text-emerald-600">{peso(totalIn)}</div></div>
+            <div className="bg-white rounded-2xl p-4 border border-stone-200"><div className="text-xs text-stone-500 mb-1">Cash Out</div><div className="font-serif text-xl text-red-600">{peso(totalOut)}</div></div>
+            <div className="bg-white rounded-2xl p-4 border border-stone-200"><div className="text-xs text-stone-500 mb-1">Net</div><div className="font-serif text-xl text-stone-900">{peso(totalIn - totalOut)}</div></div>
+          </div>
+        </PasswordGate>
       </div>
 
       <div className="bg-white rounded-2xl border border-stone-200 shadow-sm">
@@ -1321,14 +1389,17 @@ function RecordModal({ initial, employees, onClose, onSave }) {
   );
 }
 
-function LeaveCreditsPanel({ employees, attendance }) {
+function LeaveCreditsPanel({ employees, attendance, cashAdvances }) {
   const [year, setYear] = useState(new Date().getFullYear());
   const activeEmployees = employees.filter((e) => e.status === "Active");
 
   const rows = activeEmployees.map((emp) => {
     const recs = attendance.filter((a) => a.employeeId === emp.id && a.date.slice(0, 4) === String(year));
-    const sickUsed = recs.filter((a) => a.status === "Paid Sick Leave").length;
-    const vacUsed = recs.filter((a) => a.status === "Paid Vacation Leave").length;
+    const advances = cashAdvances.filter((c) => c.employeeId === emp.id && c.status === "converted" && (c.settledAt || c.date || "").slice(0, 4) === String(year));
+    const sickUsed = recs.filter((a) => a.status === "Paid Sick Leave").length
+      + advances.filter((c) => c.leaveType === "Paid Sick Leave").reduce((a, c) => a + Number(c.leaveDays || 0), 0);
+    const vacUsed = recs.filter((a) => a.status === "Paid Vacation Leave").length
+      + advances.filter((c) => c.leaveType === "Paid Vacation Leave").reduce((a, c) => a + Number(c.leaveDays || 0), 0);
     return { employee: emp, sickUsed, vacUsed };
   });
 
@@ -1416,7 +1487,7 @@ function RateHistoryModal({ employee, history, onClose, onSave }) {
   );
 }
 
-function AttendanceSection({ employees, insertEmployee, updateEmployee, removeEmployee, attendance, insertAttendance, updateAttendance, removeAttendance, rateHistory, insertRateHistory, notify, askConfirm }) {
+function AttendanceSection({ employees, insertEmployee, updateEmployee, removeEmployee, attendance, insertAttendance, updateAttendance, removeAttendance, rateHistory, insertRateHistory, cashAdvances, notify, askConfirm }) {
   const [tab, setTab] = useState("employees");
   const [empModalOpen, setEmpModalOpen] = useState(false);
   const [editEmp, setEditEmp] = useState(null);
@@ -1627,7 +1698,7 @@ function AttendanceSection({ employees, insertEmployee, updateEmployee, removeEm
       )}
 
       {tab === "leave" && (
-        <LeaveCreditsPanel employees={employees} attendance={attendance} />
+        <LeaveCreditsPanel employees={employees} attendance={attendance} cashAdvances={cashAdvances} />
       )}
 
       {empModalOpen && <EmployeeModal initial={editEmp} onClose={() => { setEmpModalOpen(false); setEditEmp(null); }} onSave={saveEmployee} />}
@@ -1763,7 +1834,7 @@ function PayrollRunModal({ run, onClose }) {
   );
 }
 
-function ThirteenthMonthPanel({ employees, attendance, rateHistory, addTransaction, notify }) {
+function ThirteenthMonthPanel({ employees, attendance, rateHistory, cashAdvances, addTransaction, notify }) {
   const [year, setYear] = useState(new Date().getFullYear());
   const activeEmployees = employees.filter((e) => e.status === "Active");
 
@@ -1778,23 +1849,28 @@ function ThirteenthMonthPanel({ employees, attendance, rateHistory, addTransacti
         basicRegularTotal += computeDayPay(r, rate).basicRegular;
       });
       basicRegularTotal = round2(basicRegularTotal);
-      return { employee: emp, basicRegularTotal, thirteenth: round2(basicRegularTotal / 12) };
+      const thirteenth = round2(basicRegularTotal / 12);
+      const outstandingAdvances = round2(
+        cashAdvances.filter((c) => c.employeeId === emp.id && c.status === "outstanding").reduce((a, c) => a + Number(c.amount || 0), 0)
+      );
+      const netThirteenth = Math.max(0, round2(thirteenth - outstandingAdvances));
+      return { employee: emp, basicRegularTotal, thirteenth, outstandingAdvances, netThirteenth };
     });
-  }, [activeEmployees, attendance, rateHistory, year]);
+  }, [activeEmployees, attendance, rateHistory, cashAdvances, year]);
 
-  const total = rows.reduce((a, b) => a + b.thirteenth, 0);
+  const total = rows.reduce((a, b) => a + b.netThirteenth, 0);
 
   const exportCsv = () => {
     downloadCSV(`13th_month_pay_${year}.csv`, [
-      ["Employee", "Total Basic Salary Earned", "13th Month Pay"],
-      ...rows.map((r) => [r.employee.name, r.basicRegularTotal, r.thirteenth]),
+      ["Employee", "Total Basic Salary Earned", "13th Month Pay (Gross)", "Outstanding Cash Advances", "13th Month Pay (Net)"],
+      ...rows.map((r) => [r.employee.name, r.basicRegularTotal, r.thirteenth, r.outstandingAdvances, r.netThirteenth]),
     ]);
   };
 
   const recordToCashOut = () => {
-    const payable = rows.filter((r) => r.thirteenth > 0);
+    const payable = rows.filter((r) => r.netThirteenth > 0);
     if (payable.length === 0) { notify("No 13th month pay due for this year", "error"); return; }
-    const note = payable.map((r) => `${r.employee.name}: ${peso(r.thirteenth)}`).join(" | ");
+    const note = payable.map((r) => `${r.employee.name}: ${peso(r.netThirteenth)}`).join(" | ");
     addTransaction({ type: "out", category: "Payroll", amount: round2(total), date: todayStr(), description: `13th Month Pay ${year} \u2014 ${note}` });
     notify("13th month pay recorded to Cash Out");
   };
@@ -1808,7 +1884,7 @@ function ThirteenthMonthPanel({ employees, attendance, rateHistory, addTransacti
         <button onClick={recordToCashOut} className={btnPrimary}><Wallet size={16} />Record to Cash Out</button>
       </div>
       <p className="px-4 pt-3 text-xs text-stone-500">
-        Computed as total basic salary earned for {year} \u00f7 12. Overtime pay and holiday premiums are excluded, in line with standard 13th month pay rules.
+        Computed as total basic salary earned for {year} \u00f7 12, minus any outstanding cash advances. Overtime pay and holiday premiums are excluded, in line with standard 13th month pay rules.
       </p>
       <div className="overflow-x-auto">
         {rows.length === 0 ? (
@@ -1817,7 +1893,7 @@ function ThirteenthMonthPanel({ employees, attendance, rateHistory, addTransacti
           <table className="w-full text-sm">
             <thead>
               <tr className="text-left text-xs text-stone-500 uppercase">
-                <th className="px-4 py-2">Employee</th><th className="px-4 py-2">Basic Salary Earned ({year})</th><th className="px-4 py-2">13th Month Pay</th>
+                <th className="px-4 py-2">Employee</th><th className="px-4 py-2">Basic Salary Earned ({year})</th><th className="px-4 py-2">13th Month (Gross)</th><th className="px-4 py-2">Cash Advances</th><th className="px-4 py-2">13th Month (Net)</th>
               </tr>
             </thead>
             <tbody>
@@ -1825,13 +1901,15 @@ function ThirteenthMonthPanel({ employees, attendance, rateHistory, addTransacti
                 <tr key={r.employee.id} className="border-t border-stone-100">
                   <td className="px-4 py-2.5 font-medium text-stone-900">{r.employee.name}</td>
                   <td className="px-4 py-2.5 text-stone-600">{peso(r.basicRegularTotal)}</td>
-                  <td className="px-4 py-2.5 font-semibold text-stone-900">{peso(r.thirteenth)}</td>
+                  <td className="px-4 py-2.5 text-stone-600">{peso(r.thirteenth)}</td>
+                  <td className="px-4 py-2.5 text-red-600">{r.outstandingAdvances > 0 ? `-${peso(r.outstandingAdvances)}` : "\u2014"}</td>
+                  <td className="px-4 py-2.5 font-semibold text-stone-900">{peso(r.netThirteenth)}</td>
                 </tr>
               ))}
             </tbody>
             <tfoot>
               <tr className="border-t-2 border-stone-200 font-semibold text-stone-900">
-                <td className="px-4 py-2.5" colSpan={2}>Total</td>
+                <td className="px-4 py-2.5" colSpan={4}>Total</td>
                 <td className="px-4 py-2.5">{peso(round2(total))}</td>
               </tr>
             </tfoot>
@@ -1842,7 +1920,152 @@ function ThirteenthMonthPanel({ employees, attendance, rateHistory, addTransacti
   );
 }
 
-function PayrollSection({ employees, attendance, rateHistory, addTransaction, payrollRuns, insertPayrollRun, notify }) {
+function AddCashAdvanceModal({ employees, onClose, onSave }) {
+  const [employeeId, setEmployeeId] = useState(employees[0]?.id || "");
+  const [amount, setAmount] = useState("");
+  const [date, setDate] = useState(todayStr());
+  const [note, setNote] = useState("");
+
+  const submit = () => {
+    if (!employeeId || !amount || Number(amount) <= 0) return;
+    onSave({ employeeId, amount: Number(amount), date, note });
+  };
+
+  return (
+    <Modal title="Add Cash Advance" onClose={onClose} footer={<><button onClick={onClose} className={btnGhost}>Cancel</button><button onClick={submit} className={btnPrimary}>Save</button></>}>
+      <Field label="Employee">
+        <select value={employeeId} onChange={(e) => setEmployeeId(e.target.value)} className={inputCls()}>
+          {employees.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+        </select>
+      </Field>
+      <Field label="Amount (PHP)">
+        <input type="number" min="0" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} className={inputCls()} placeholder="0.00" autoFocus />
+      </Field>
+      <Field label="Date"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} className={inputCls()} /></Field>
+      <Field label="Note (optional)"><input value={note} onChange={(e) => setNote(e.target.value)} className={inputCls()} /></Field>
+    </Modal>
+  );
+}
+
+function ConvertToLeaveModal({ advance, employee, onClose, onSave }) {
+  const suggestedDays = employee?.dailyRate ? round2(advance.amount / Number(employee.dailyRate)) : "";
+  const [leaveType, setLeaveType] = useState("Paid Vacation Leave");
+  const [leaveDays, setLeaveDays] = useState(suggestedDays);
+
+  const submit = () => {
+    if (!leaveDays || Number(leaveDays) <= 0) return;
+    onSave({ leaveType, leaveDays: Number(leaveDays) });
+  };
+
+  return (
+    <Modal title="Convert to Leave" onClose={onClose} footer={<><button onClick={onClose} className={btnGhost}>Cancel</button><button onClick={submit} className={btnPrimary}>Convert</button></>}>
+      <p className="text-sm text-stone-600 mb-3">
+        Converting {employee?.name}'s {peso(advance.amount)} cash advance into leave days, based on their daily rate of {peso(employee?.dailyRate)}.
+      </p>
+      <Field label="Leave Type">
+        <select value={leaveType} onChange={(e) => setLeaveType(e.target.value)} className={inputCls()}>
+          <option value="Paid Vacation Leave">Paid Vacation Leave</option>
+          <option value="Paid Sick Leave">Paid Sick Leave</option>
+        </select>
+      </Field>
+      <Field label="Leave Days">
+        <input type="number" min="0" step="0.5" value={leaveDays} onChange={(e) => setLeaveDays(e.target.value)} className={inputCls()} />
+      </Field>
+      <p className="text-xs text-stone-400">This will deduct from the employee's available leave credits instead of cash.</p>
+    </Modal>
+  );
+}
+
+function CashAdvancesPanel({ employees, cashAdvances, insertCashAdvance, updateCashAdvance, notify, askConfirm }) {
+  const [addOpen, setAddOpen] = useState(false);
+  const [convertFor, setConvertFor] = useState(null);
+
+  const empName = (id) => employees.find((e) => e.id === id)?.name || "Unknown";
+  const empById = (id) => employees.find((e) => e.id === id);
+
+  const outstanding = cashAdvances
+    .filter((c) => c.status === "outstanding")
+    .sort((a, b) => b.date.localeCompare(a.date));
+  const totalOutstanding = outstanding.reduce((a, c) => a + Number(c.amount || 0), 0);
+
+  const addAdvance = (adv) => {
+    insertCashAdvance({ id: uid(), status: "outstanding", createdAt: Date.now(), ...adv });
+    notify("Cash advance recorded");
+    setAddOpen(false);
+  };
+
+  const markPaid = (id) => {
+    askConfirm("Mark this cash advance as paid back? It will no longer be deducted from 13th month pay.", () => {
+      updateCashAdvance(id, { status: "paid", settledAt: todayStr() });
+      notify("Cash advance marked as paid");
+    });
+  };
+
+  const convert = (entry) => {
+    updateCashAdvance(convertFor.id, {
+      status: "converted",
+      leaveType: entry.leaveType,
+      leaveDays: entry.leaveDays,
+      settledAt: todayStr(),
+    });
+    notify("Cash advance converted to leave");
+    setConvertFor(null);
+  };
+
+  return (
+    <div className="bg-white rounded-2xl border border-stone-200 shadow-sm">
+      <div className="flex flex-wrap items-center gap-2 p-4 border-b border-stone-100">
+        <h3 className="font-serif text-base text-stone-900 mr-auto">Cash Advances</h3>
+        <span className="text-sm text-stone-500">Outstanding total: <strong className="text-red-600">{peso(totalOutstanding)}</strong></span>
+        <button onClick={() => setAddOpen(true)} className={btnPrimary}><Plus size={16} />Add Cash Advance</button>
+      </div>
+      <p className="px-4 pt-3 text-xs text-stone-500">
+        Outstanding advances are automatically deducted from that employee's 13th month pay. Settle one by marking it paid (cash returned) or converting it into Paid Sick/Vacation leave days.
+      </p>
+      <div className="overflow-x-auto">
+        {outstanding.length === 0 ? (
+          <EmptyState icon={Wallet} text="No outstanding cash advances." />
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-xs text-stone-500 uppercase">
+                <th className="px-4 py-2">Employee</th><th className="px-4 py-2">Date</th><th className="px-4 py-2">Amount</th><th className="px-4 py-2">Note</th><th className="px-4 py-2"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {outstanding.map((c) => (
+                <tr key={c.id} className="border-t border-stone-100">
+                  <td className="px-4 py-2.5 font-medium text-stone-900">{empName(c.employeeId)}</td>
+                  <td className="px-4 py-2.5 text-stone-500">{fmtDate(c.date)}</td>
+                  <td className="px-4 py-2.5 text-red-600 font-medium">{peso(c.amount)}</td>
+                  <td className="px-4 py-2.5 text-stone-500">{c.note || "\u2014"}</td>
+                  <td className="px-4 py-2.5">
+                    <div className="flex items-center gap-1 justify-end">
+                      <button onClick={() => markPaid(c.id)} className={btnGhost}>Mark Paid</button>
+                      <button onClick={() => setConvertFor(c)} className={btnGhost}>Convert to Leave</button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {addOpen && <AddCashAdvanceModal employees={employees.filter((e) => e.status === "Active")} onClose={() => setAddOpen(false)} onSave={addAdvance} />}
+      {convertFor && (
+        <ConvertToLeaveModal
+          advance={convertFor}
+          employee={empById(convertFor.employeeId)}
+          onClose={() => setConvertFor(null)}
+          onSave={convert}
+        />
+      )}
+    </div>
+  );
+}
+
+function PayrollSection({ employees, attendance, rateHistory, cashAdvances, insertCashAdvance, updateCashAdvance, addTransaction, payrollRuns, insertPayrollRun, notify, askConfirm }) {
   const [periodType, setPeriodType] = useState("Monthly");
   const [start, setStart] = useState(startOfMonth(todayStr()));
   const [deductions, setDeductions] = useState({});
@@ -1995,7 +2218,16 @@ function PayrollSection({ employees, attendance, rateHistory, addTransaction, pa
         )}
       </div>
 
-      <ThirteenthMonthPanel employees={employees} attendance={attendance} rateHistory={rateHistory} addTransaction={addTransaction} notify={notify} />
+      <CashAdvancesPanel
+        employees={employees}
+        cashAdvances={cashAdvances}
+        insertCashAdvance={insertCashAdvance}
+        updateCashAdvance={updateCashAdvance}
+        notify={notify}
+        askConfirm={askConfirm}
+      />
+
+      <ThirteenthMonthPanel employees={employees} attendance={attendance} rateHistory={rateHistory} cashAdvances={cashAdvances} addTransaction={addTransaction} notify={notify} />
 
       {payslip && <PayslipModal row={payslip} periodType={periodType} start={start} end={end} onClose={() => setPayslip(null)} />}
       {historyOpen && <PayrollRunModal run={historyOpen} onClose={() => setHistoryOpen(null)} />}
@@ -2023,6 +2255,7 @@ function ClinicApp({ session }) {
   const [attendance, l7, insertAttendance, updateAttendance, removeAttendance] = useSupabaseTable("attendance");
   const [payrollRuns, l8, insertPayrollRun] = useSupabaseTable("payroll_runs");
   const [rateHistory, l9, insertRateHistory] = useSupabaseTable("rate_history");
+  const [cashAdvances, l10, insertCashAdvance, updateCashAdvance] = useSupabaseTable("cash_advances");
   const clinicSettings = useSupabaseSettings();
 
   const [active, setActive] = useState("dashboard");
@@ -2030,8 +2263,10 @@ function ClinicApp({ session }) {
   const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
   const [confirmState, setConfirmState] = useState(null);
+  const [unlocked, setUnlocked] = useState({ payroll: false, analytics: false, salesTotals: false });
+  const unlock = (key) => setUnlocked((u) => ({ ...u, [key]: true }));
 
-  const loaded = l1 && l2 && l3 && l4 && l5 && l6 && l7 && l8 && l9;
+  const loaded = l1 && l2 && l3 && l4 && l5 && l6 && l7 && l8 && l9 && l10;
 
   const notify = (message, type = "success") => {
     setToast({ message, type });
@@ -2102,6 +2337,8 @@ function ClinicApp({ session }) {
             employees={employees}
             attendance={attendance}
             setActive={setActive}
+            analyticsUnlocked={unlocked.analytics}
+            onUnlockAnalytics={() => unlock("analytics")}
           />
         )}
         {active === "sales" && (
@@ -2110,6 +2347,8 @@ function ClinicApp({ session }) {
             insertTransaction={insertTransaction}
             updateTransaction={updateTransaction}
             removeTransaction={removeTransaction}
+            totalsUnlocked={unlocked.salesTotals}
+            onUnlockTotals={() => unlock("salesTotals")}
             notify={notify}
             askConfirm={askConfirm}
           />
@@ -2165,12 +2404,27 @@ function ClinicApp({ session }) {
             removeAttendance={removeAttendance}
             rateHistory={rateHistory}
             insertRateHistory={insertRateHistory}
+            cashAdvances={cashAdvances}
             notify={notify}
             askConfirm={askConfirm}
           />
         )}
         {active === "payroll" && (
-          <PayrollSection employees={employees} attendance={attendance} rateHistory={rateHistory} addTransaction={addTransaction} payrollRuns={payrollRuns} insertPayrollRun={insertPayrollRun} notify={notify} />
+          <PasswordGate password={RESTRICTED_PASSWORD} unlocked={unlocked.payroll} onUnlock={() => unlock("payroll")} label="Payroll">
+            <PayrollSection
+              employees={employees}
+              attendance={attendance}
+              rateHistory={rateHistory}
+              cashAdvances={cashAdvances}
+              insertCashAdvance={insertCashAdvance}
+              updateCashAdvance={updateCashAdvance}
+              addTransaction={addTransaction}
+              payrollRuns={payrollRuns}
+              insertPayrollRun={insertPayrollRun}
+              notify={notify}
+              askConfirm={askConfirm}
+            />
+          </PasswordGate>
         )}
       </main>
 
