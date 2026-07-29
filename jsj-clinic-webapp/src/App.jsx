@@ -2113,6 +2113,80 @@ function CashAdvancesPanel({ employees, cashAdvances, insertCashAdvance, updateC
   );
 }
 
+function PayrollLeaveCreditsPanel({ employees, attendance, cashAdvances }) {
+  const [year, setYear] = useState(new Date().getFullYear());
+  const activeEmployees = employees.filter((e) => e.status === "Active");
+
+  const rows = activeEmployees.map((emp) => {
+    const recs = attendance.filter((a) => a.employeeId === emp.id && a.date.slice(0, 4) === String(year));
+    const advances = cashAdvances.filter((c) => c.employeeId === emp.id && c.status === "converted" && (c.settledAt || c.date || "").slice(0, 4) === String(year));
+    const sickUsed = recs.filter((a) => a.status === "Paid Sick Leave").length
+      + advances.filter((c) => c.leaveType === "Paid Sick Leave").reduce((a, c) => a + Number(c.leaveDays || 0), 0);
+    const vacUsed = recs.filter((a) => a.status === "Paid Vacation Leave").length
+      + advances.filter((c) => c.leaveType === "Paid Vacation Leave").reduce((a, c) => a + Number(c.leaveDays || 0), 0);
+    const sickRemaining = Math.max(0, SICK_LEAVE_ALLOWANCE - sickUsed);
+    const vacRemaining = Math.max(0, VACATION_LEAVE_ALLOWANCE - vacUsed);
+    const rate = Number(emp.dailyRate) || 0;
+    const sickValue = round2(sickRemaining * rate);
+    const vacValue = round2(vacRemaining * rate);
+    return { employee: emp, sickRemaining, vacRemaining, sickValue, vacValue, totalValue: round2(sickValue + vacValue) };
+  });
+
+  const grandTotal = round2(rows.reduce((a, r) => a + r.totalValue, 0));
+
+  const exportCsv = () => {
+    downloadCSV(`leave_credits_value_${year}.csv`, [
+      ["Employee", "Daily Rate", "Sick Remaining", "Vacation Remaining", "Sick Value", "Vacation Value", "Total Value"],
+      ...rows.map((r) => [r.employee.name, r.employee.dailyRate, r.sickRemaining, r.vacRemaining, r.sickValue, r.vacValue, r.totalValue]),
+    ]);
+  };
+
+  return (
+    <div className="bg-white rounded-2xl border border-stone-200 shadow-sm">
+      <div className="flex flex-wrap items-center gap-2 p-4 border-b border-stone-100">
+        <h3 className="font-serif text-base text-stone-900 mr-auto">Leave Credits</h3>
+        <input type="number" value={year} onChange={(e) => setYear(Number(e.target.value) || year)} className={inputCls("w-28")} />
+        <button onClick={exportCsv} className={btnGhost}><Download size={15} />Export</button>
+      </div>
+      <p className="px-4 pt-3 text-xs text-stone-500">
+        Remaining leave credits for {year} ({SICK_LEAVE_ALLOWANCE} paid Sick + {VACATION_LEAVE_ALLOWANCE} paid Vacation days per year), valued automatically using each employee's current daily rate.
+      </p>
+      <div className="overflow-x-auto">
+        {rows.length === 0 ? (
+          <EmptyState icon={Users} text="No active employees." />
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-xs text-stone-500 uppercase">
+                <th className="px-4 py-2">Employee</th><th className="px-4 py-2">Daily Rate</th><th className="px-4 py-2">Sick Remaining</th><th className="px-4 py-2">Vacation Remaining</th><th className="px-4 py-2">Sick Value</th><th className="px-4 py-2">Vacation Value</th><th className="px-4 py-2">Total Value</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.employee.id} className="border-t border-stone-100">
+                  <td className="px-4 py-2.5 font-medium text-stone-900">{r.employee.name}</td>
+                  <td className="px-4 py-2.5 text-stone-600">{peso(r.employee.dailyRate)}</td>
+                  <td className="px-4 py-2.5 text-stone-600">{r.sickRemaining} / {SICK_LEAVE_ALLOWANCE}</td>
+                  <td className="px-4 py-2.5 text-stone-600">{r.vacRemaining} / {VACATION_LEAVE_ALLOWANCE}</td>
+                  <td className="px-4 py-2.5 text-stone-600">{peso(r.sickValue)}</td>
+                  <td className="px-4 py-2.5 text-stone-600">{peso(r.vacValue)}</td>
+                  <td className="px-4 py-2.5 font-semibold text-stone-900">{peso(r.totalValue)}</td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr className="border-t-2 border-stone-200 font-semibold text-stone-900">
+                <td className="px-4 py-2.5" colSpan={6}>Total</td>
+                <td className="px-4 py-2.5">{peso(grandTotal)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function PayrollSection({ employees, attendance, rateHistory, cashAdvances, insertCashAdvance, updateCashAdvance, addTransaction, payrollRuns, insertPayrollRun, notify, askConfirm }) {
   const [periodType, setPeriodType] = useState("Monthly");
   const [start, setStart] = useState(startOfMonth(todayStr()));
@@ -2274,6 +2348,8 @@ function PayrollSection({ employees, attendance, rateHistory, cashAdvances, inse
         notify={notify}
         askConfirm={askConfirm}
       />
+
+      <PayrollLeaveCreditsPanel employees={employees} attendance={attendance} cashAdvances={cashAdvances} />
 
       <ThirteenthMonthPanel employees={employees} attendance={attendance} rateHistory={rateHistory} cashAdvances={cashAdvances} addTransaction={addTransaction} notify={notify} />
 
