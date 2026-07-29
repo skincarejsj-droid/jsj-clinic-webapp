@@ -1851,7 +1851,9 @@ function ThirteenthMonthPanel({ employees, attendance, rateHistory, cashAdvances
       basicRegularTotal = round2(basicRegularTotal);
       const thirteenth = round2(basicRegularTotal / 12);
       const outstandingAdvances = round2(
-        cashAdvances.filter((c) => c.employeeId === emp.id && c.status === "outstanding").reduce((a, c) => a + Number(c.amount || 0), 0)
+        cashAdvances
+          .filter((c) => c.employeeId === emp.id && c.status === "outstanding")
+          .reduce((a, c) => a + (Number(c.amount || 0) - Number(c.amountPaid || 0)), 0)
       );
       const netThirteenth = Math.max(0, round2(thirteenth - outstandingAdvances));
       return { employee: emp, basicRegularTotal, thirteenth, outstandingAdvances, netThirteenth };
@@ -1948,7 +1950,8 @@ function AddCashAdvanceModal({ employees, onClose, onSave }) {
 }
 
 function ConvertToLeaveModal({ advance, employee, onClose, onSave }) {
-  const suggestedDays = employee?.dailyRate ? round2(advance.amount / Number(employee.dailyRate)) : "";
+  const remaining = round2(Number(advance.amount) - Number(advance.amountPaid || 0));
+  const suggestedDays = employee?.dailyRate ? round2(remaining / Number(employee.dailyRate)) : "";
   const [leaveType, setLeaveType] = useState("Paid Vacation Leave");
   const [leaveDays, setLeaveDays] = useState(suggestedDays);
 
@@ -1960,7 +1963,7 @@ function ConvertToLeaveModal({ advance, employee, onClose, onSave }) {
   return (
     <Modal title="Convert to Leave" onClose={onClose} footer={<><button onClick={onClose} className={btnGhost}>Cancel</button><button onClick={submit} className={btnPrimary}>Convert</button></>}>
       <p className="text-sm text-stone-600 mb-3">
-        Converting {employee?.name}'s {peso(advance.amount)} cash advance into leave days, based on their daily rate of {peso(employee?.dailyRate)}.
+        Converting {employee?.name}'s remaining {peso(remaining)} balance into leave days, based on their daily rate of {peso(employee?.dailyRate)}.
       </p>
       <Field label="Leave Type">
         <select value={leaveType} onChange={(e) => setLeaveType(e.target.value)} className={inputCls()}>
@@ -1976,29 +1979,64 @@ function ConvertToLeaveModal({ advance, employee, onClose, onSave }) {
   );
 }
 
+function RecordPaymentModal({ advance, employee, onClose, onSave }) {
+  const remaining = round2(Number(advance.amount) - Number(advance.amountPaid || 0));
+  const [amount, setAmount] = useState(remaining);
+
+  const submit = () => {
+    const val = Number(amount);
+    if (!val || val <= 0) return;
+    onSave(Math.min(val, remaining));
+  };
+
+  return (
+    <Modal title="Record Payment" onClose={onClose} footer={<><button onClick={onClose} className={btnGhost}>Cancel</button><button onClick={submit} className={btnPrimary}>Record Payment</button></>}>
+      <div className="text-sm space-y-1 mb-4">
+        <div className="flex justify-between"><span className="text-stone-500">Employee</span><span className="font-medium">{employee?.name}</span></div>
+        <div className="flex justify-between"><span className="text-stone-500">Original Amount</span><span>{peso(advance.amount)}</span></div>
+        <div className="flex justify-between"><span className="text-stone-500">Paid So Far</span><span>{peso(advance.amountPaid || 0)}</span></div>
+        <div className="flex justify-between font-semibold text-stone-900 pt-1 border-t border-stone-100"><span>Remaining Balance</span><span>{peso(remaining)}</span></div>
+      </div>
+      <Field label="Payment Amount (PHP)">
+        <input type="number" min="0" max={remaining} step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} className={inputCls()} autoFocus />
+      </Field>
+      <p className="text-xs text-stone-400">Enter less than the full remaining balance to record a partial payment \u2014 the advance stays outstanding for whatever's left.</p>
+    </Modal>
+  );
+}
+
 function CashAdvancesPanel({ employees, cashAdvances, insertCashAdvance, updateCashAdvance, notify, askConfirm }) {
   const [addOpen, setAddOpen] = useState(false);
   const [convertFor, setConvertFor] = useState(null);
+  const [payFor, setPayFor] = useState(null);
 
   const empName = (id) => employees.find((e) => e.id === id)?.name || "Unknown";
   const empById = (id) => employees.find((e) => e.id === id);
+  const remainingOf = (c) => round2(Number(c.amount) - Number(c.amountPaid || 0));
 
   const outstanding = cashAdvances
     .filter((c) => c.status === "outstanding")
     .sort((a, b) => b.date.localeCompare(a.date));
-  const totalOutstanding = outstanding.reduce((a, c) => a + Number(c.amount || 0), 0);
+  const totalOutstanding = outstanding.reduce((a, c) => a + remainingOf(c), 0);
 
   const addAdvance = (adv) => {
-    insertCashAdvance({ id: uid(), status: "outstanding", createdAt: Date.now(), ...adv });
+    insertCashAdvance({ id: uid(), status: "outstanding", amountPaid: 0, createdAt: Date.now(), ...adv });
     notify("Cash advance recorded");
     setAddOpen(false);
   };
 
-  const markPaid = (id) => {
-    askConfirm("Mark this cash advance as paid back? It will no longer be deducted from 13th month pay.", () => {
-      updateCashAdvance(id, { status: "paid", settledAt: todayStr() });
-      notify("Cash advance marked as paid");
+  const recordPayment = (paidAmount) => {
+    const advance = payFor;
+    const newPaid = round2(Number(advance.amountPaid || 0) + Number(paidAmount));
+    const remaining = round2(Number(advance.amount) - newPaid);
+    const fullyPaid = remaining <= 0.01;
+    updateCashAdvance(advance.id, {
+      amountPaid: newPaid,
+      status: fullyPaid ? "paid" : "outstanding",
+      settledAt: fullyPaid ? todayStr() : (advance.settledAt || null),
     });
+    notify(fullyPaid ? "Cash advance fully paid" : `Partial payment of ${peso(paidAmount)} recorded`);
+    setPayFor(null);
   };
 
   const convert = (entry) => {
@@ -2020,7 +2058,7 @@ function CashAdvancesPanel({ employees, cashAdvances, insertCashAdvance, updateC
         <button onClick={() => setAddOpen(true)} className={btnPrimary}><Plus size={16} />Add Cash Advance</button>
       </div>
       <p className="px-4 pt-3 text-xs text-stone-500">
-        Outstanding advances are automatically deducted from that employee's 13th month pay. Settle one by marking it paid (cash returned) or converting it into Paid Sick/Vacation leave days.
+        Outstanding balances are automatically deducted from that employee's 13th month pay. Settle one with a full or partial payment, or convert the remaining balance into Paid Sick/Vacation leave days.
       </p>
       <div className="overflow-x-auto">
         {outstanding.length === 0 ? (
@@ -2029,7 +2067,7 @@ function CashAdvancesPanel({ employees, cashAdvances, insertCashAdvance, updateC
           <table className="w-full text-sm">
             <thead>
               <tr className="text-left text-xs text-stone-500 uppercase">
-                <th className="px-4 py-2">Employee</th><th className="px-4 py-2">Date</th><th className="px-4 py-2">Amount</th><th className="px-4 py-2">Note</th><th className="px-4 py-2"></th>
+                <th className="px-4 py-2">Employee</th><th className="px-4 py-2">Date</th><th className="px-4 py-2">Original</th><th className="px-4 py-2">Paid So Far</th><th className="px-4 py-2">Remaining</th><th className="px-4 py-2">Note</th><th className="px-4 py-2"></th>
               </tr>
             </thead>
             <tbody>
@@ -2037,11 +2075,13 @@ function CashAdvancesPanel({ employees, cashAdvances, insertCashAdvance, updateC
                 <tr key={c.id} className="border-t border-stone-100">
                   <td className="px-4 py-2.5 font-medium text-stone-900">{empName(c.employeeId)}</td>
                   <td className="px-4 py-2.5 text-stone-500">{fmtDate(c.date)}</td>
-                  <td className="px-4 py-2.5 text-red-600 font-medium">{peso(c.amount)}</td>
+                  <td className="px-4 py-2.5 text-stone-600">{peso(c.amount)}</td>
+                  <td className="px-4 py-2.5 text-emerald-600">{Number(c.amountPaid || 0) > 0 ? peso(c.amountPaid) : "\u2014"}</td>
+                  <td className="px-4 py-2.5 text-red-600 font-medium">{peso(remainingOf(c))}</td>
                   <td className="px-4 py-2.5 text-stone-500">{c.note || "\u2014"}</td>
                   <td className="px-4 py-2.5">
                     <div className="flex items-center gap-1 justify-end">
-                      <button onClick={() => markPaid(c.id)} className={btnGhost}>Mark Paid</button>
+                      <button onClick={() => setPayFor(c)} className={btnGhost}>Record Payment</button>
                       <button onClick={() => setConvertFor(c)} className={btnGhost}>Convert to Leave</button>
                     </div>
                   </td>
@@ -2053,6 +2093,14 @@ function CashAdvancesPanel({ employees, cashAdvances, insertCashAdvance, updateC
       </div>
 
       {addOpen && <AddCashAdvanceModal employees={employees.filter((e) => e.status === "Active")} onClose={() => setAddOpen(false)} onSave={addAdvance} />}
+      {payFor && (
+        <RecordPaymentModal
+          advance={payFor}
+          employee={empById(payFor.employeeId)}
+          onClose={() => setPayFor(null)}
+          onSave={recordPayment}
+        />
+      )}
       {convertFor && (
         <ConvertToLeaveModal
           advance={convertFor}
