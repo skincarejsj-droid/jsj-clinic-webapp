@@ -1281,6 +1281,141 @@ function InventoryModule({ title, icon: Icon, items, log, insertItem, updateItem
   );
 }
 
+const PAYMENT_STATUSES = ["Cash", "Check", "E-Payment", "Unpaid"];
+
+function AddMedicationPurchaseModal({ medItems, onClose, onSave }) {
+  const [itemId, setItemId] = useState(medItems[0]?.id || "");
+  const [supplier, setSupplier] = useState("");
+  const [buyingPrice, setBuyingPrice] = useState("");
+  const [sellingPrice, setSellingPrice] = useState("");
+  const [quantity, setQuantity] = useState("");
+  const [dateDelivered, setDateDelivered] = useState(todayStr());
+  const [courier, setCourier] = useState("");
+  const [paymentStatus, setPaymentStatus] = useState("Cash");
+  const [alsoStockIn, setAlsoStockIn] = useState(true);
+
+  const sortedItems = [...medItems].sort((a, b) => a.name.localeCompare(b.name));
+
+  const submit = () => {
+    if (!itemId || !quantity || Number(quantity) <= 0) return;
+    const item = medItems.find((i) => i.id === itemId);
+    onSave({
+      purchase: {
+        itemId,
+        itemName: item?.name || "",
+        supplier,
+        buyingPrice: buyingPrice ? Number(buyingPrice) : 0,
+        sellingPrice: sellingPrice ? Number(sellingPrice) : 0,
+        quantity: Number(quantity),
+        dateDelivered,
+        courier,
+        paymentStatus,
+      },
+      alsoStockIn,
+    });
+  };
+
+  return (
+    <Modal title="Add Medication Purchase" onClose={onClose} footer={<><button onClick={onClose} className={btnGhost}>Cancel</button><button onClick={submit} className={btnPrimary}>Save</button></>}>
+      <Field label="Product">
+        <select value={itemId} onChange={(e) => setItemId(e.target.value)} className={inputCls()}>
+          {sortedItems.map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}
+        </select>
+      </Field>
+      <Field label="Supplier"><input value={supplier} onChange={(e) => setSupplier(e.target.value)} className={inputCls()} /></Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Buying Price (PHP)"><input type="number" min="0" step="0.01" value={buyingPrice} onChange={(e) => setBuyingPrice(e.target.value)} className={inputCls()} placeholder="0.00" /></Field>
+        <Field label="Selling Price (PHP)"><input type="number" min="0" step="0.01" value={sellingPrice} onChange={(e) => setSellingPrice(e.target.value)} className={inputCls()} placeholder="0.00" /></Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Quantity"><input type="number" min="1" value={quantity} onChange={(e) => setQuantity(e.target.value)} className={inputCls()} /></Field>
+        <Field label="Date Delivered"><input type="date" value={dateDelivered} onChange={(e) => setDateDelivered(e.target.value)} className={inputCls()} /></Field>
+      </div>
+      <Field label="Courier"><input value={courier} onChange={(e) => setCourier(e.target.value)} className={inputCls()} placeholder="e.g. Lalamove, J&T" /></Field>
+      <Field label="Payment Status">
+        <select value={paymentStatus} onChange={(e) => setPaymentStatus(e.target.value)} className={inputCls()}>
+          {PAYMENT_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
+      </Field>
+      <label className="flex items-center gap-2 text-sm text-stone-700 mt-1">
+        <input type="checkbox" checked={alsoStockIn} onChange={(e) => setAlsoStockIn(e.target.checked)} />
+        Also add this quantity as Stock In in the regular Medications section
+      </label>
+    </Modal>
+  );
+}
+
+function MedicationPurchasesPanel({ medItems, purchases, insertPurchase, updateMedItem, insertMedLog, unlocked, onUnlock, notify }) {
+  const [addOpen, setAddOpen] = useState(false);
+
+  const sorted = [...purchases].sort((a, b) => (String(b.dateDelivered) + String(b.createdAt || 0)).localeCompare(String(a.dateDelivered) + String(a.createdAt || 0)));
+
+  const add = ({ purchase, alsoStockIn }) => {
+    insertPurchase({ id: uid(), createdAt: Date.now(), ...purchase });
+    if (alsoStockIn) {
+      const item = medItems.find((i) => i.id === purchase.itemId);
+      if (item) {
+        updateMedItem(item.id, { quantity: Number(item.quantity) + Number(purchase.quantity) });
+        insertMedLog({
+          id: uid(),
+          itemId: item.id,
+          itemName: item.name,
+          type: "in",
+          qty: Number(purchase.quantity),
+          date: purchase.dateDelivered,
+          note: purchase.supplier ? `Purchase from ${purchase.supplier}` : "Purchase",
+          amount: 0,
+          createdAt: Date.now(),
+        });
+      }
+    }
+    notify("Purchase recorded");
+    setAddOpen(false);
+  };
+
+  const paymentTone = (status) => (status === "Unpaid" ? "red" : status === "Cash" ? "green" : "neutral");
+
+  return (
+    <div className="bg-white rounded-2xl border border-stone-200 shadow-sm">
+      <div className="flex flex-wrap items-center gap-2 p-4 border-b border-stone-100">
+        <h3 className="font-serif text-base text-stone-900 mr-auto">Purchasing (Supplier &amp; Pricing)</h3>
+        {unlocked && <button onClick={() => setAddOpen(true)} className={btnPrimary}><Plus size={16} />Add Purchase</button>}
+      </div>
+      <PasswordGate password={RESTRICTED_PASSWORD} unlocked={unlocked} onUnlock={onUnlock} label="Medication Purchasing">
+        <div className="overflow-x-auto">
+          {sorted.length === 0 ? (
+            <EmptyState icon={Pill} text="No purchases recorded yet." />
+          ) : (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs text-stone-500 uppercase">
+                  <th className="px-4 py-2">Product</th><th className="px-4 py-2">Supplier</th><th className="px-4 py-2">Buying Price</th><th className="px-4 py-2">Selling Price</th><th className="px-4 py-2">Qty</th><th className="px-4 py-2">Date Delivered</th><th className="px-4 py-2">Courier</th><th className="px-4 py-2">Payment</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sorted.map((p) => (
+                  <tr key={p.id} className="border-t border-stone-100">
+                    <td className="px-4 py-2.5 font-medium text-stone-900">{p.itemName}</td>
+                    <td className="px-4 py-2.5 text-stone-600">{p.supplier || "\u2014"}</td>
+                    <td className="px-4 py-2.5 text-stone-600">{peso(p.buyingPrice)}</td>
+                    <td className="px-4 py-2.5 text-stone-600">{peso(p.sellingPrice)}</td>
+                    <td className="px-4 py-2.5 text-stone-600">{p.quantity}</td>
+                    <td className="px-4 py-2.5 text-stone-500">{fmtDate(p.dateDelivered)}</td>
+                    <td className="px-4 py-2.5 text-stone-500">{p.courier || "\u2014"}</td>
+                    <td className="px-4 py-2.5"><Badge tone={paymentTone(p.paymentStatus)}>{p.paymentStatus}</Badge></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </PasswordGate>
+
+      {addOpen && <AddMedicationPurchaseModal medItems={medItems} onClose={() => setAddOpen(false)} onSave={add} />}
+    </div>
+  );
+}
+
 /* ============================== Attendance ============================== */
 
 function EmployeeModal({ initial, onClose, onSave }) {
@@ -2380,6 +2515,7 @@ function ClinicApp({ session }) {
   const [payrollRuns, l8, insertPayrollRun] = useSupabaseTable("payroll_runs");
   const [rateHistory, l9, insertRateHistory] = useSupabaseTable("rate_history");
   const [cashAdvances, l10, insertCashAdvance, updateCashAdvance] = useSupabaseTable("cash_advances");
+  const [medPurchases, l11, insertMedPurchase] = useSupabaseTable("medication_purchases");
   const clinicSettings = useSupabaseSettings();
 
   const [active, setActive] = useState("dashboard");
@@ -2387,10 +2523,10 @@ function ClinicApp({ session }) {
   const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
   const [confirmState, setConfirmState] = useState(null);
-  const [unlocked, setUnlocked] = useState({ payroll: false, analytics: false, salesTotals: false });
+  const [unlocked, setUnlocked] = useState({ payroll: false, analytics: false, salesTotals: false, medPurchases: false });
   const unlock = (key) => setUnlocked((u) => ({ ...u, [key]: true }));
 
-  const loaded = l1 && l2 && l3 && l4 && l5 && l6 && l7 && l8 && l9 && l10;
+  const loaded = l1 && l2 && l3 && l4 && l5 && l6 && l7 && l8 && l9 && l10 && l11;
 
   const notify = (message, type = "success") => {
     setToast({ message, type });
@@ -2478,24 +2614,36 @@ function ClinicApp({ session }) {
           />
         )}
         {active === "medications" && (
-          <InventoryModule
-            title="Medication"
-            icon={Pill}
-            items={medItems}
-            log={medLog}
-            insertItem={insertMedItem}
-            updateItem={updateMedItem}
-            removeItem={removeMedItem}
-            insertLog={insertMedLog}
-            cashOutCategory="Inventory"
-            cashInCategory="Medications"
-            allowSaleIncome={true}
-            reasonsOut={MED_OUT_REASONS}
-            unitOptions={["pcs", "box", "bottle", "vial", "ampule", "tube", "pack"]}
-            addTransaction={addTransaction}
-            notify={notify}
-            askConfirm={askConfirm}
-          />
+          <div className="space-y-5">
+            <InventoryModule
+              title="Medication"
+              icon={Pill}
+              items={medItems}
+              log={medLog}
+              insertItem={insertMedItem}
+              updateItem={updateMedItem}
+              removeItem={removeMedItem}
+              insertLog={insertMedLog}
+              cashOutCategory="Inventory"
+              cashInCategory="Medications"
+              allowSaleIncome={true}
+              reasonsOut={MED_OUT_REASONS}
+              unitOptions={["pcs", "box", "bottle", "vial", "ampule", "tube", "pack"]}
+              addTransaction={addTransaction}
+              notify={notify}
+              askConfirm={askConfirm}
+            />
+            <MedicationPurchasesPanel
+              medItems={medItems}
+              purchases={medPurchases}
+              insertPurchase={insertMedPurchase}
+              updateMedItem={updateMedItem}
+              insertMedLog={insertMedLog}
+              unlocked={unlocked.medPurchases}
+              onUnlock={() => unlock("medPurchases")}
+              notify={notify}
+            />
+          </div>
         )}
         {active === "supplies" && (
           <InventoryModule
