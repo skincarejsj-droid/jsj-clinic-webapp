@@ -1283,15 +1283,16 @@ function InventoryModule({ title, icon: Icon, items, log, insertItem, updateItem
 
 const PAYMENT_STATUSES = ["Cash", "Check", "E-Payment", "Unpaid"];
 
-function AddMedicationPurchaseModal({ medItems, onClose, onSave }) {
-  const [itemId, setItemId] = useState(medItems[0]?.id || "");
-  const [supplier, setSupplier] = useState("");
-  const [buyingPrice, setBuyingPrice] = useState("");
-  const [sellingPrice, setSellingPrice] = useState("");
-  const [quantity, setQuantity] = useState("");
-  const [dateDelivered, setDateDelivered] = useState(todayStr());
-  const [courier, setCourier] = useState("");
-  const [paymentStatus, setPaymentStatus] = useState("Cash");
+function MedicationPurchaseModal({ medItems, initial, onClose, onSave }) {
+  const isEdit = !!initial;
+  const [itemId, setItemId] = useState(initial?.itemId || medItems[0]?.id || "");
+  const [supplier, setSupplier] = useState(initial?.supplier || "");
+  const [buyingPrice, setBuyingPrice] = useState(initial?.buyingPrice ?? "");
+  const [sellingPrice, setSellingPrice] = useState(initial?.sellingPrice ?? "");
+  const [quantity, setQuantity] = useState(initial?.quantity ?? "");
+  const [dateDelivered, setDateDelivered] = useState(initial?.dateDelivered || todayStr());
+  const [courier, setCourier] = useState(initial?.courier || "");
+  const [paymentStatus, setPaymentStatus] = useState(initial?.paymentStatus || "Cash");
   const [alsoStockIn, setAlsoStockIn] = useState(true);
 
   const sortedItems = [...medItems].sort((a, b) => a.name.localeCompare(b.name));
@@ -1299,24 +1300,26 @@ function AddMedicationPurchaseModal({ medItems, onClose, onSave }) {
   const submit = () => {
     if (!itemId || !quantity || Number(quantity) <= 0) return;
     const item = medItems.find((i) => i.id === itemId);
-    onSave({
-      purchase: {
-        itemId,
-        itemName: item?.name || "",
-        supplier,
-        buyingPrice: buyingPrice ? Number(buyingPrice) : 0,
-        sellingPrice: sellingPrice ? Number(sellingPrice) : 0,
-        quantity: Number(quantity),
-        dateDelivered,
-        courier,
-        paymentStatus,
-      },
-      alsoStockIn,
-    });
+    const purchase = {
+      itemId,
+      itemName: item?.name || "",
+      supplier,
+      buyingPrice: buyingPrice ? Number(buyingPrice) : 0,
+      sellingPrice: sellingPrice ? Number(sellingPrice) : 0,
+      quantity: Number(quantity),
+      dateDelivered,
+      courier,
+      paymentStatus,
+    };
+    if (isEdit) {
+      onSave(purchase);
+    } else {
+      onSave({ purchase, alsoStockIn });
+    }
   };
 
   return (
-    <Modal title="Add Medication Purchase" onClose={onClose} footer={<><button onClick={onClose} className={btnGhost}>Cancel</button><button onClick={submit} className={btnPrimary}>Save</button></>}>
+    <Modal title={isEdit ? "Edit Medication Purchase" : "Add Medication Purchase"} onClose={onClose} footer={<><button onClick={onClose} className={btnGhost}>Cancel</button><button onClick={submit} className={btnPrimary}>Save</button></>}>
       <Field label="Product">
         <select value={itemId} onChange={(e) => setItemId(e.target.value)} className={inputCls()}>
           {sortedItems.map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}
@@ -1337,18 +1340,23 @@ function AddMedicationPurchaseModal({ medItems, onClose, onSave }) {
           {PAYMENT_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
         </select>
       </Field>
-      <label className="flex items-center gap-2 text-sm text-stone-700 mt-1">
-        <input type="checkbox" checked={alsoStockIn} onChange={(e) => setAlsoStockIn(e.target.checked)} />
-        Also add this quantity as Stock In in the regular Medications section
-      </label>
+      {isEdit ? (
+        <p className="text-xs text-stone-400 mt-1">Editing only updates this purchase record \u2014 it won't adjust medication stock quantities.</p>
+      ) : (
+        <label className="flex items-center gap-2 text-sm text-stone-700 mt-1">
+          <input type="checkbox" checked={alsoStockIn} onChange={(e) => setAlsoStockIn(e.target.checked)} />
+          Also add this quantity as Stock In in the regular Medications section
+        </label>
+      )}
     </Modal>
   );
 }
 
-function MedicationPurchasesPanel({ medItems, purchases, insertPurchase, updateMedItem, insertMedLog, unlocked, onUnlock, notify }) {
+function MedicationPurchasesPanel({ medItems, purchases, insertPurchase, updateMedItem, insertMedLog, updatePurchase, unlocked, onUnlock, notify }) {
   const [addOpen, setAddOpen] = useState(false);
+  const [editPurchase, setEditPurchase] = useState(null);
 
-  const sorted = [...purchases].sort((a, b) => (String(b.dateDelivered) + String(b.createdAt || 0)).localeCompare(String(a.dateDelivered) + String(a.createdAt || 0)));
+  const sorted = [...purchases].sort((a, b) => (a.itemName || "").localeCompare(b.itemName || ""));
 
   const add = ({ purchase, alsoStockIn }) => {
     insertPurchase({ id: uid(), createdAt: Date.now(), ...purchase });
@@ -1373,6 +1381,12 @@ function MedicationPurchasesPanel({ medItems, purchases, insertPurchase, updateM
     setAddOpen(false);
   };
 
+  const saveEdit = (patch) => {
+    updatePurchase(editPurchase.id, patch);
+    notify("Purchase updated");
+    setEditPurchase(null);
+  };
+
   const paymentTone = (status) => (status === "Unpaid" ? "red" : status === "Cash" ? "green" : "neutral");
 
   return (
@@ -1389,7 +1403,7 @@ function MedicationPurchasesPanel({ medItems, purchases, insertPurchase, updateM
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-xs text-stone-500 uppercase">
-                  <th className="px-4 py-2">Product</th><th className="px-4 py-2">Supplier</th><th className="px-4 py-2">Buying Price</th><th className="px-4 py-2">Selling Price</th><th className="px-4 py-2">Qty</th><th className="px-4 py-2">Date Delivered</th><th className="px-4 py-2">Courier</th><th className="px-4 py-2">Payment</th>
+                  <th className="px-4 py-2">Product</th><th className="px-4 py-2">Supplier</th><th className="px-4 py-2">Buying Price</th><th className="px-4 py-2">Selling Price</th><th className="px-4 py-2">Qty</th><th className="px-4 py-2">Date Delivered</th><th className="px-4 py-2">Courier</th><th className="px-4 py-2">Payment</th><th className="px-4 py-2"></th>
                 </tr>
               </thead>
               <tbody>
@@ -1403,6 +1417,7 @@ function MedicationPurchasesPanel({ medItems, purchases, insertPurchase, updateM
                     <td className="px-4 py-2.5 text-stone-500">{fmtDate(p.dateDelivered)}</td>
                     <td className="px-4 py-2.5 text-stone-500">{p.courier || "\u2014"}</td>
                     <td className="px-4 py-2.5"><Badge tone={paymentTone(p.paymentStatus)}>{p.paymentStatus}</Badge></td>
+                    <td className="px-4 py-2.5"><button onClick={() => setEditPurchase(p)} className={btnIcon}><Pencil size={14} /></button></td>
                   </tr>
                 ))}
               </tbody>
@@ -1411,7 +1426,8 @@ function MedicationPurchasesPanel({ medItems, purchases, insertPurchase, updateM
         </div>
       </PasswordGate>
 
-      {addOpen && <AddMedicationPurchaseModal medItems={medItems} onClose={() => setAddOpen(false)} onSave={add} />}
+      {addOpen && <MedicationPurchaseModal medItems={medItems} onClose={() => setAddOpen(false)} onSave={add} />}
+      {editPurchase && <MedicationPurchaseModal medItems={medItems} initial={editPurchase} onClose={() => setEditPurchase(null)} onSave={saveEdit} />}
     </div>
   );
 }
@@ -2515,7 +2531,7 @@ function ClinicApp({ session }) {
   const [payrollRuns, l8, insertPayrollRun] = useSupabaseTable("payroll_runs");
   const [rateHistory, l9, insertRateHistory] = useSupabaseTable("rate_history");
   const [cashAdvances, l10, insertCashAdvance, updateCashAdvance] = useSupabaseTable("cash_advances");
-  const [medPurchases, l11, insertMedPurchase] = useSupabaseTable("medication_purchases");
+  const [medPurchases, l11, insertMedPurchase, updateMedPurchase] = useSupabaseTable("medication_purchases");
   const clinicSettings = useSupabaseSettings();
 
   const [active, setActive] = useState("dashboard");
@@ -2637,6 +2653,7 @@ function ClinicApp({ session }) {
               medItems={medItems}
               purchases={medPurchases}
               insertPurchase={insertMedPurchase}
+              updatePurchase={updateMedPurchase}
               updateMedItem={updateMedItem}
               insertMedLog={insertMedLog}
               unlocked={unlocked.medPurchases}
