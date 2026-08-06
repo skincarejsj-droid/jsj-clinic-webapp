@@ -1922,7 +1922,7 @@ function PayslipModal({ row, periodType, start, end, onClose }) {
   const ded = row.ded || {};
   return (
     <Modal title="Payslip" onClose={onClose} footer={<><button onClick={onClose} className={btnGhost}>Close</button><button onClick={() => window.print()} className={btnPrimary}><Printer size={15} />Print</button></>}>
-      <div className="text-sm space-y-3">
+      <div className="text-sm space-y-3 printable-payslip">
         <div className="text-center mb-4">
           <div className="font-serif text-lg text-stone-900">JSJ Skin Care Medical and Aesthetic Clinic</div>
           <div className="text-xs text-stone-500">Payslip \u2014 {periodType} ({fmtDate(start)} \u2013 {fmtDate(end)})</div>
@@ -2584,6 +2584,14 @@ function ClinicApp({ session }) {
         ::-webkit-scrollbar-thumb { background: #e7e5e4; border-radius: 4px; }
         @media print {
           body * { visibility: hidden; }
+          .printable-payslip, .printable-payslip * { visibility: visible; }
+          .printable-payslip {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100%;
+            padding: 24px;
+          }
         }
         /* Brand palette sampled directly from the JSJ Skin Care logo:
            navy #323850 (the two "J" strokes) and gray #545454 (the "S"). */
