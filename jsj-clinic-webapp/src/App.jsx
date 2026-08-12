@@ -166,7 +166,7 @@ const VACATION_LEAVE_ALLOWANCE = 10;
 const STANDARD_HOURS = 8;
 const RESTRICTED_PASSWORD = "051192"; // gates Payroll, Cash Flow Analytics, and Sales totals
 const OT_UNDERTIME_THRESHOLD_HOURS = 0.5; // must differ from 8 hours by at least 30 minutes to count as OT/undertime
-const MED_OUT_REASONS = ["Used in Treatment", "Sold", "Expired", "Damaged", "Other"];
+const MED_OUT_REASONS = ["Sold", "Used in Treatment", "Expired", "Damaged", "Other"];
 const SUP_OUT_REASONS = ["Used in Clinic", "Damaged", "Other"];
 
 function round2(n) {
