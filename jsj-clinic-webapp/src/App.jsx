@@ -2338,7 +2338,217 @@ function PayrollLeaveCreditsPanel({ employees, attendance, cashAdvances }) {
   );
 }
 
-function PayrollSection({ employees, attendance, rateHistory, cashAdvances, insertCashAdvance, updateCashAdvance, addTransaction, payrollRuns, insertPayrollRun, notify, askConfirm }) {
+function IncentiveStatementModal({ row, year, onClose }) {
+  return (
+    <Modal title="Yearly Incentives Statement" onClose={onClose} footer={<><button onClick={onClose} className={btnGhost}>Close</button><button onClick={() => window.print()} className={btnPrimary}><Printer size={15} />Print</button></>}>
+      <div className="text-sm space-y-3 printable-payslip">
+        <div className="text-center mb-4">
+          <div className="font-serif text-lg text-stone-900">JSJ Skin Care Medical and Aesthetic Clinic</div>
+          <div className="text-xs text-stone-500">Yearly Incentives Statement — {year}{row.finalized ? "" : " (Draft — not yet finalized)"}</div>
+        </div>
+        <div className="flex justify-between"><span className="text-stone-500">Employee</span><span className="font-medium">{row.employee.name}</span></div>
+        <div className="flex justify-between"><span className="text-stone-500">Position</span><span>{row.employee.position || "—"}</span></div>
+        <div className="flex justify-between pt-2 border-t border-stone-100"><span className="text-stone-500">Basic Salary Earned to Date</span><span>{peso(row.basicActual)}</span></div>
+        {row.basicProjected > 0 && (
+          <div className="flex justify-between"><span className="text-stone-500">Projected Basic Salary (rest of {year})</span><span>{peso(row.basicProjected)}</span></div>
+        )}
+        <div className="flex justify-between"><span className="text-stone-500">13th Month Pay (Total Basic ÷ 12)</span><span>{peso(row.thirteenth)}</span></div>
+        {row.priorAdjustment !== 0 && (
+          <div className="flex justify-between"><span className="text-stone-500">Adjustment from {year - 1} 13th Month</span><span>{row.priorAdjustment < 0 ? "-" : ""}{peso(Math.abs(row.priorAdjustment))}</span></div>
+        )}
+        <div className="flex justify-between"><span className="text-stone-500">Unused Leave Credits ({row.sickRemaining} sick + {row.vacRemaining} vacation days)</span><span>{peso(row.leaveValue)}</span></div>
+        <div className="flex justify-between pt-2 border-t border-stone-100 font-medium"><span className="text-stone-700">Gross Incentives</span><span>{peso(row.gross)}</span></div>
+        <div className="flex justify-between"><span className="text-stone-500">Cash Advance Balance Before Deduction</span><span>{peso(row.advanceBalance)}</span></div>
+        <div className="flex justify-between"><span className="text-stone-500">Less: Cash Advance Deduction</span><span>-{peso(row.deduction)}</span></div>
+        <div className="flex justify-between pt-2 border-t border-stone-100 text-base font-semibold text-stone-900"><span>Net Incentives</span><span>{peso(row.net)}</span></div>
+        <div className="flex justify-between text-xs text-stone-500"><span>Cash advance balance carried over to {year + 1}</span><span>{peso(row.carried)}</span></div>
+        <p className="text-xs text-stone-400 pt-1">13th month pay is based on basic salary only (excludes overtime and holiday premiums). Any difference between this estimate and the actual {year} computation is adjusted in the following year's 13th month pay.</p>
+        <div className="grid grid-cols-2 gap-10 pt-12">
+          <div className="text-center">
+            <div className="border-t border-stone-700 pt-1 text-xs">{row.employee.name}</div>
+            <div className="text-xs text-stone-500">Employee Signature / Date</div>
+          </div>
+          <div className="text-center">
+            <div className="border-t border-stone-700 pt-1 text-xs">Medical Director / Owner</div>
+            <div className="text-xs text-stone-500">JSJ Skin Care Medical and Aesthetic Clinic</div>
+          </div>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function YearlyIncentivesPanel({ employees, attendance, rateHistory, cashAdvances, updateCashAdvance, yearlyIncentives, insertYearlyIncentive, notify, askConfirm }) {
+  const [year, setYear] = useState(new Date().getFullYear());
+  const [useProjection, setUseProjection] = useState(true);
+  const [deductInputs, setDeductInputs] = useState({});
+  const [printRow, setPrintRow] = useState(null);
+  const activeEmployees = employees.filter((e) => e.status === "Active");
+  const isCurrentYear = year >= new Date().getFullYear();
+
+  const actual13th = (empId, fallbackRate, y) => {
+    const recs = attendance.filter((a) => a.employeeId === empId && a.date >= `${y}-01-01` && a.date <= `${y}-12-31`);
+    let total = 0;
+    recs.forEach((r) => { total += computeDayPay(r, getRateForDate(empId, r.date, fallbackRate, rateHistory)).basicRegular; });
+    return { basic: round2(total), thirteenth: round2(total / 12), last: recs.reduce((m, r) => (r.date > m ? r.date : m), "") };
+  };
+
+  const rows = useMemo(() => {
+    return activeEmployees.map((emp) => {
+      const saved = yearlyIncentives.find((y) => y.employeeId === emp.id && Number(y.year) === year);
+      const act = actual13th(emp.id, emp.dailyRate, year);
+
+      // Project remaining workdays (Mon-Sat) from the day after the last attendance record through Dec 31
+      let projectedDays = 0;
+      let basicProjected = 0;
+      if (isCurrentYear && useProjection) {
+        const lastDate = act.last || `${year}-01-01`;
+        let d = act.last ? addDays(lastDate, 1) : lastDate;
+        const end = `${year}-12-31`;
+        const rate = getRateForDate(emp.id, end, emp.dailyRate, rateHistory);
+        while (d <= end) {
+          if (new Date(d + "T00:00:00").getDay() !== 0) projectedDays += 1;
+          d = addDays(d, 1);
+        }
+        basicProjected = round2(projectedDays * rate);
+      }
+      const thirteenth = round2((act.basic + basicProjected) / 12);
+
+      // Prior-year deviation: true actual of last year minus the estimate that was paid
+      const prior = yearlyIncentives.find((y) => y.employeeId === emp.id && Number(y.year) === year - 1);
+      const priorAdjustment = prior ? round2(actual13th(emp.id, emp.dailyRate, year - 1).thirteenth - Number(prior.thirteenthEstimate || 0)) : 0;
+
+      // Leave credits
+      const recs = attendance.filter((a) => a.employeeId === emp.id && a.date.slice(0, 4) === String(year));
+      const conv = cashAdvances.filter((c) => c.employeeId === emp.id && c.status === "converted" && (c.settledAt || c.date || "").slice(0, 4) === String(year));
+      const sickUsed = recs.filter((a) => a.status === "Paid Sick Leave").length + conv.filter((c) => c.leaveType === "Paid Sick Leave").reduce((a, c) => a + Number(c.leaveDays || 0), 0);
+      const vacUsed = recs.filter((a) => a.status === "Paid Vacation Leave").length + conv.filter((c) => c.leaveType === "Paid Vacation Leave").reduce((a, c) => a + Number(c.leaveDays || 0), 0);
+      const sickRemaining = Math.max(0, SICK_LEAVE_ALLOWANCE - sickUsed);
+      const vacRemaining = Math.max(0, VACATION_LEAVE_ALLOWANCE - vacUsed);
+      const leaveValue = round2((sickRemaining + vacRemaining) * (Number(emp.dailyRate) || 0));
+
+      const advanceLive = round2(cashAdvances.filter((c) => c.employeeId === emp.id && c.status === "outstanding").reduce((a, c) => a + (Number(c.amount || 0) - Number(c.amountPaid || 0)), 0));
+
+      if (saved) {
+        const gross = round2(Number(saved.thirteenthEstimate) + Number(saved.priorYearAdjustment) + Number(saved.leaveValue));
+        return {
+          employee: emp, finalized: true, saved,
+          basicActual: Number(saved.basicActualToDate), basicProjected: Number(saved.basicProjected), projectedDays: 0,
+          thirteenth: Number(saved.thirteenthEstimate), priorAdjustment: Number(saved.priorYearAdjustment),
+          sickRemaining, vacRemaining, leaveValue: Number(saved.leaveValue), gross,
+          advanceBalance: Number(saved.advanceBalanceBefore), deduction: Number(saved.actualDeduction),
+          carried: Number(saved.advanceBalanceCarried), net: Number(saved.netPayout),
+        };
+      }
+      const deduction = Math.min(Math.max(0, Number(deductInputs[emp.id]) || 0), advanceLive);
+      const gross = round2(thirteenth + priorAdjustment + leaveValue);
+      return {
+        employee: emp, finalized: false, saved: null,
+        basicActual: act.basic, basicProjected, projectedDays, thirteenth, priorAdjustment,
+        sickRemaining, vacRemaining, leaveValue, gross,
+        advanceBalance: advanceLive, deduction, carried: round2(advanceLive - deduction), net: round2(gross - deduction),
+      };
+    });
+  }, [activeEmployees, attendance, rateHistory, cashAdvances, yearlyIncentives, year, useProjection, deductInputs, isCurrentYear]);
+
+  const finalize = (r) => {
+    askConfirm(`Finalize ${year} incentives for ${r.employee.name}? Net payout ${peso(r.net)}. ${r.deduction > 0 ? `${peso(r.deduction)} will be recorded as a cash advance payment.` : ""} This cannot be undone.`, () => {
+      let left = r.deduction;
+      const open = cashAdvances
+        .filter((c) => c.employeeId === r.employee.id && c.status === "outstanding")
+        .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+      for (const c of open) {
+        if (left <= 0.004) break;
+        const remaining = round2(Number(c.amount) - Number(c.amountPaid || 0));
+        const pay = Math.min(left, remaining);
+        const newPaid = round2(Number(c.amountPaid || 0) + pay);
+        const cleared = round2(Number(c.amount) - newPaid) <= 0.01;
+        updateCashAdvance(c.id, { amountPaid: newPaid, status: cleared ? "paid" : "outstanding", settledAt: cleared ? todayStr() : (c.settledAt || null) });
+        left = round2(left - pay);
+      }
+      insertYearlyIncentive({
+        id: uid(), employeeId: r.employee.id, year,
+        basicActualToDate: r.basicActual, basicProjected: r.basicProjected, thirteenthEstimate: r.thirteenth,
+        priorYearAdjustment: r.priorAdjustment, leaveValue: r.leaveValue,
+        advanceBalanceBefore: r.advanceBalance, actualDeduction: r.deduction, advanceBalanceCarried: r.carried,
+        netPayout: r.net, finalizedAt: todayStr(), createdAt: Date.now(),
+      });
+      notify(`${r.employee.name}'s ${year} incentives finalized`);
+    });
+  };
+
+  const exportCsv = () => {
+    downloadCSV(`yearly_incentives_${year}.csv`, [
+      ["Employee", "Basic Earned", "Basic Projected", "13th Month", `Adj. from ${year - 1}`, "Leave Credits Value", "Gross", "Advance Balance", "Actual Deduction", "Carried Over", "Net", "Status"],
+      ...rows.map((r) => [r.employee.name, r.basicActual, r.basicProjected, r.thirteenth, r.priorAdjustment, r.leaveValue, r.gross, r.advanceBalance, r.deduction, r.carried, r.net, r.finalized ? "Finalized" : "Draft"]),
+    ]);
+  };
+
+  return (
+    <div className="bg-white rounded-2xl border border-stone-200 shadow-sm">
+      <div className="flex flex-wrap items-center gap-2 p-4 border-b border-stone-100">
+        <h3 className="font-serif text-base text-stone-900 mr-auto">Yearly Incentives</h3>
+        {isCurrentYear && (
+          <label className="flex items-center gap-1.5 text-xs text-stone-600">
+            <input type="checkbox" checked={useProjection} onChange={(e) => setUseProjection(e.target.checked)} />
+            Project rest of year
+          </label>
+        )}
+        <input type="number" value={year} onChange={(e) => setYear(Number(e.target.value) || year)} className={inputCls("w-28")} />
+        <button onClick={exportCsv} className={btnGhost}><Download size={15} />Export</button>
+      </div>
+      <p className="px-4 pt-3 text-xs text-stone-500">
+        13th month pay = total basic salary ÷ 12. Since it is paid in December, the remaining Mon–Sat workdays up to Dec 31 are projected at the current daily rate. Any difference from the true {year} figure is automatically adjusted in {year + 1}'s 13th month. Leave credits are paid out at the daily rate. Enter the <strong>Actual Deduction</strong> for cash advances, then Finalize — it is recorded as a payment in Cash Advances, and any remaining balance carries over to {year + 1}.
+      </p>
+      <div className="overflow-x-auto">
+        {rows.length === 0 ? (
+          <EmptyState icon={Calculator} text="No active employees." />
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-xs text-stone-500 uppercase">
+                <th className="px-4 py-2">Employee</th><th className="px-4 py-2">13th Month</th><th className="px-4 py-2">Prior-Yr Adj.</th><th className="px-4 py-2">Leave Credits</th><th className="px-4 py-2">Gross</th><th className="px-4 py-2">Cash Advance Balance</th><th className="px-4 py-2">Actual Deduction</th><th className="px-4 py-2">Net</th><th className="px-4 py-2">Carried Over</th><th className="px-4 py-2"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.employee.id} className="border-t border-stone-100">
+                  <td className="px-4 py-2.5 font-medium text-stone-900">
+                    {r.employee.name}
+                    <div className="text-xs font-normal text-stone-400">{r.finalized ? "Finalized" : r.basicProjected > 0 ? `Includes ${r.projectedDays} projected days` : "Draft"}</div>
+                  </td>
+                  <td className="px-4 py-2.5 text-stone-600">{peso(r.thirteenth)}</td>
+                  <td className="px-4 py-2.5 text-stone-600">{r.priorAdjustment === 0 ? "—" : `${r.priorAdjustment < 0 ? "-" : "+"}${peso(Math.abs(r.priorAdjustment))}`}</td>
+                  <td className="px-4 py-2.5 text-stone-600">{peso(r.leaveValue)}</td>
+                  <td className="px-4 py-2.5 text-stone-600">{peso(r.gross)}</td>
+                  <td className="px-4 py-2.5 text-red-600">{r.advanceBalance > 0 ? peso(r.advanceBalance) : "—"}</td>
+                  <td className="px-4 py-2.5">
+                    {r.finalized ? (
+                      <span className="text-stone-600">{peso(r.deduction)}</span>
+                    ) : (
+                      <input type="number" min="0" step="0.01" value={deductInputs[r.employee.id] ?? ""} onChange={(e) => setDeductInputs((d) => ({ ...d, [r.employee.id]: e.target.value }))} className={inputCls("w-28")} placeholder="0.00" disabled={r.advanceBalance <= 0} />
+                    )}
+                  </td>
+                  <td className="px-4 py-2.5 font-semibold text-stone-900">{peso(r.net)}</td>
+                  <td className="px-4 py-2.5 text-stone-600">{r.carried > 0 ? peso(r.carried) : "—"}</td>
+                  <td className="px-4 py-2.5">
+                    <div className="flex items-center gap-1 justify-end">
+                      <button onClick={() => setPrintRow(r)} className={btnGhost}><Printer size={14} />Print</button>
+                      {!r.finalized && <button onClick={() => finalize(r)} className={btnPrimary}>Finalize</button>}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+      {printRow && <IncentiveStatementModal row={rows.find((x) => x.employee.id === printRow.employee.id) || printRow} year={year} onClose={() => setPrintRow(null)} />}
+    </div>
+  );
+}
+
+function PayrollSection({ employees, attendance, rateHistory, cashAdvances, insertCashAdvance, updateCashAdvance, addTransaction, payrollRuns, insertPayrollRun, yearlyIncentives, insertYearlyIncentive, notify, askConfirm }) {
   const [periodType, setPeriodType] = useState("Monthly");
   const [start, setStart] = useState(startOfMonth(todayStr()));
   const [deductions, setDeductions] = useState({});
@@ -2504,6 +2714,8 @@ function PayrollSection({ employees, attendance, rateHistory, cashAdvances, inse
 
       <ThirteenthMonthPanel employees={employees} attendance={attendance} rateHistory={rateHistory} cashAdvances={cashAdvances} addTransaction={addTransaction} notify={notify} />
 
+      <YearlyIncentivesPanel employees={employees} attendance={attendance} rateHistory={rateHistory} cashAdvances={cashAdvances} updateCashAdvance={updateCashAdvance} yearlyIncentives={yearlyIncentives} insertYearlyIncentive={insertYearlyIncentive} notify={notify} askConfirm={askConfirm} />
+
       {payslip && <PayslipModal row={payslip} periodType={periodType} start={start} end={end} onClose={() => setPayslip(null)} />}
       {historyOpen && <PayrollRunModal run={historyOpen} onClose={() => setHistoryOpen(null)} />}
       {dedEmployee && (
@@ -2532,6 +2744,7 @@ function ClinicApp({ session }) {
   const [rateHistory, l9, insertRateHistory] = useSupabaseTable("rate_history");
   const [cashAdvances, l10, insertCashAdvance, updateCashAdvance] = useSupabaseTable("cash_advances");
   const [medPurchases, l11, insertMedPurchase, updateMedPurchase] = useSupabaseTable("medication_purchases");
+  const [yearlyIncentives, l12, insertYearlyIncentive] = useSupabaseTable("yearly_incentives");
   const clinicSettings = useSupabaseSettings();
 
   const [active, setActive] = useState("dashboard");
@@ -2542,7 +2755,7 @@ function ClinicApp({ session }) {
   const [unlocked, setUnlocked] = useState({ payroll: false, analytics: false, salesTotals: false, medPurchases: false });
   const unlock = (key) => setUnlocked((u) => ({ ...u, [key]: true }));
 
-  const loaded = l1 && l2 && l3 && l4 && l5 && l6 && l7 && l8 && l9 && l10 && l11;
+  const loaded = l1 && l2 && l3 && l4 && l5 && l6 && l7 && l8 && l9 && l10 && l11 && l12;
 
   const notify = (message, type = "success") => {
     setToast({ message, type });
@@ -2718,6 +2931,8 @@ function ClinicApp({ session }) {
               addTransaction={addTransaction}
               payrollRuns={payrollRuns}
               insertPayrollRun={insertPayrollRun}
+              yearlyIncentives={yearlyIncentives}
+              insertYearlyIncentive={insertYearlyIncentive}
               notify={notify}
               askConfirm={askConfirm}
             />
